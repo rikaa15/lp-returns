@@ -35,9 +35,9 @@ This combines data from `actions.csv` + `earnings_per_action.csv`, fetches cbBTC
 npm run analyze
 ```
 
-This reads the LP analysis CSV and calculates comprehensive return metrics, generating `output/analysis_summary.csv` with:
-- Position-by-position breakdown (one row per position)
-- Wallet-level totals in the last row (row_type = "wallet_summary")
+This reads the LP analysis CSV and calculates comprehensive return metrics, generating:
+- `output/analysis_summary.csv` - Position aggregated statistics
+- `output/analysis_by_day.csv` - Daily aggregated statistics
 
 ## Input Files
 
@@ -94,6 +94,20 @@ The script fetches cbBTC prices from on-chain swap events:
 ## Analysis Metrics
 
 The analysis calculates the following metrics (using formulas from the reference implementation):
+
+### Daily Statistics (`analysis_by_day.csv`)
+Each row represents one day of trading activity:
+- **date**: Calendar date (YYYY-MM-DD)
+- **events_count**: Total events that day
+- **positions_opened**: Number of mint events
+- **positions_closed**: Number of burn events  
+- **deposit_usdc / deposit_cbbtc**: Total deposited that day
+- **deposit_value_usd**: Total USD value of deposits
+- **withdraw_usdc / withdraw_cbbtc**: Total withdrawn that day
+- **withdraw_value_usd**: Total USD value of withdrawals
+- **fees_collected_usd**: Trading fees collected that day
+- **aero_rewards_collected**: AERO rewards earned that day
+- **daily_profit_usd**: Daily profit (fees + rewards)
 
 ### Wallet-Level Statistics
 - **positions_count**: Number of unique LP positions

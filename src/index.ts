@@ -4,12 +4,14 @@ import * as fs from "fs";
 import * as path from "path";
 import { parse } from "csv-parse/sync";
 import { stringify } from "csv-stringify/sync";
+import axios from "axios";
 
 // Configuration
 const RPC_URL = process.env.BASE_RPC_URL || "https://mainnet.base.org";
 const POOL_ADDRESS = "0x4e962BB3889Bf030368F56810A9c96B83CB3E778"; // USDC-cbBTC pool
 const TOKEN0_DECIMALS = 6; // USDC
 const TOKEN1_DECIMALS = 8; // cbBTC
+const COINGECKO_API_URL = "https://api.coingecko.com/api/v3";
 
 // Swap event signature for Uniswap V3 (Aerodrome uses V3 style)
 const SWAP_V3_SIG = "Swap(address,address,int256,int256,uint160,uint128,int24)";
@@ -155,102 +157,142 @@ async function getSwapLogsInRange(fromBlock: number, toBlock: number, retries = 
   throw new Error("Max retries exceeded");
 }
 
-async function findClosestSwapBefore(block: number, logIndex: number): Promise<SwapEvent | null> {
-  console.log(`  Finding swap before block ${block}, log index ${logIndex}...`);
+// Fetch all swaps in a block range and cache them
+async function fetchAllSwapsInRange(fromBlock: number, toBlock: number): Promise<SwapEvent[]> {
+  console.log(`\nFetching all swap events from block ${fromBlock} to ${toBlock}...`);
   
-  const stepSizes = [0, 100, 500, 2000, 10000, 50000];
+  const swaps: SwapEvent[] = [];
+  const CHUNK_SIZE = 10000; // Adjust based on your RPC limits
   
-  for (const step of stepSizes) {
-    const fromBlock = Math.max(0, block - step);
+  for (let start = fromBlock; start <= toBlock; start += CHUNK_SIZE) {
+    const end = Math.min(start + CHUNK_SIZE - 1, toBlock);
+    console.log(`  Fetching blocks ${start} to ${end}...`);
     
-    // Add small delay between requests to avoid rate limits
-    if (step > 0) {
-      await sleep(100);
+    const logs = await getSwapLogsInRange(start, end);
+    
+    for (const log of logs) {
+      const sqrtPriceX96 = parseSqrtPriceX96FromSwapData(log.data);
+      swaps.push({
+        blockNumber: Number(log.blockNumber),
+        transactionHash: log.transactionHash,
+        index: Number(log.index),
+        sqrtPriceX96,
+      });
     }
     
-    const logs = await getSwapLogsInRange(fromBlock, block);
-    
-    // Filter to only swaps at or before our target
-    const validSwaps = logs.filter((log) => {
-      const logBlock = Number(log.blockNumber);
-      const logIdx = Number(log.index);
-      // Must be in an earlier block, or same block but earlier index
-      return logBlock < block || (logBlock === block && logIdx < logIndex);
-    });
-    
-    if (validSwaps.length > 0) {
-      // Get the latest (closest to our target)
-      validSwaps.sort((a, b) => {
-        const blockDiff = Number(b.blockNumber) - Number(a.blockNumber);
-        if (blockDiff !== 0) return blockDiff;
-        return Number(b.index) - Number(a.index);
-      });
-      
-      const closestSwap = validSwaps[0];
-      const sqrtPriceX96 = parseSqrtPriceX96FromSwapData(closestSwap.data);
-      
-      console.log(`    ✓ Found swap at block ${closestSwap.blockNumber}, index ${closestSwap.index}`);
-      
-      return {
-        blockNumber: Number(closestSwap.blockNumber),
-        transactionHash: closestSwap.transactionHash,
-        index: Number(closestSwap.index),
-        sqrtPriceX96,
-      };
+    // Small delay between chunks to be respectful to RPC
+    if (end < toBlock) {
+      await sleep(200);
     }
   }
   
-  console.log(`    ✗ No swap found`);
+  // Sort by block number and index for efficient searching
+  swaps.sort((a, b) => {
+    const blockDiff = a.blockNumber - b.blockNumber;
+    if (blockDiff !== 0) return blockDiff;
+    return a.index - b.index;
+  });
+  
+  console.log(`✓ Fetched and cached ${swaps.length} swap events\n`);
+  return swaps;
+}
+
+// Find closest swap before using cached swaps (much faster!)
+function findClosestSwapBeforeFromCache(swaps: SwapEvent[], block: number, logIndex: number): SwapEvent | null {
+  let result: SwapEvent | null = null;
+  
+  // Iterate through sorted swaps to find the closest one before our target
+  for (const swap of swaps) {
+    if (swap.blockNumber < block || (swap.blockNumber === block && swap.index < logIndex)) {
+      result = swap; // Keep updating with later swaps
+    } else {
+      break; // We've gone past our target, no need to continue
+    }
+  }
+  
+  return result;
+}
+
+// Find closest swap after using cached swaps (much faster!)
+function findClosestSwapAfterFromCache(swaps: SwapEvent[], block: number, logIndex: number): SwapEvent | null {
+  // Iterate through sorted swaps to find the first one after our target
+  for (const swap of swaps) {
+    if (swap.blockNumber > block || (swap.blockNumber === block && swap.index > logIndex)) {
+      return swap; // Return first match
+    }
+  }
+  
   return null;
 }
 
-async function findClosestSwapAfter(block: number, logIndex: number): Promise<SwapEvent | null> {
-  console.log(`  Finding swap after block ${block}, log index ${logIndex}...`);
+// Fetch AERO price data from CoinGecko API
+async function fetchAeroPrices(startTimestamp: string, endTimestamp: string): Promise<Map<number, number>> {
+  console.log("\nFetching AERO prices from CoinGecko...");
   
-  const stepSizes = [0, 100, 500, 2000, 10000, 50000];
+  const startDate = new Date(startTimestamp);
+  const endDate = new Date(endTimestamp);
   
-  for (const step of stepSizes) {
-    const toBlock = block + step;
+  // Add 1 day buffer on each side
+  const fromUnix = Math.floor(startDate.getTime() / 1000) - 86400;
+  const toUnix = Math.floor(endDate.getTime() / 1000) + 86400;
+  
+  try {
+    // CoinGecko API endpoint for historical market data
+    // Using "aerodrome-finance" as the coin ID
+    const response = await axios.get(
+      `${COINGECKO_API_URL}/coins/aerodrome-finance/market_chart/range`,
+      {
+        params: {
+          vs_currency: "usd",
+          from: fromUnix,
+          to: toUnix,
+        },
+      }
+    );
     
-    // Add small delay between requests to avoid rate limits
-    if (step > 0) {
-      await sleep(100);
+    // Response format: { prices: [[timestamp_ms, price], ...] }
+    const prices = response.data.prices as [number, number][];
+    
+    // Create a map of timestamp (seconds) -> price
+    const priceMap = new Map<number, number>();
+    
+    for (const [timestampMs, price] of prices) {
+      const timestampSec = Math.floor(timestampMs / 1000);
+      priceMap.set(timestampSec, price);
     }
     
-    const logs = await getSwapLogsInRange(block, toBlock);
-    
-    // Filter to only swaps at or after our target
-    const validSwaps = logs.filter((log) => {
-      const logBlock = Number(log.blockNumber);
-      const logIdx = Number(log.index);
-      // Must be in a later block, or same block but later index
-      return logBlock > block || (logBlock === block && logIdx > logIndex);
-    });
-    
-    if (validSwaps.length > 0) {
-      // Get the earliest (closest to our target)
-      validSwaps.sort((a, b) => {
-        const blockDiff = Number(a.blockNumber) - Number(b.blockNumber);
-        if (blockDiff !== 0) return blockDiff;
-        return Number(a.index) - Number(b.index);
-      });
-      
-      const closestSwap = validSwaps[0];
-      const sqrtPriceX96 = parseSqrtPriceX96FromSwapData(closestSwap.data);
-      
-      console.log(`    ✓ Found swap at block ${closestSwap.blockNumber}, index ${closestSwap.index}`);
-      
-      return {
-        blockNumber: Number(closestSwap.blockNumber),
-        transactionHash: closestSwap.transactionHash,
-        index: Number(closestSwap.index),
-        sqrtPriceX96,
-      };
+    console.log(`✓ Fetched ${priceMap.size} AERO price points\n`);
+    return priceMap;
+  } catch (error: any) {
+    console.error("Failed to fetch AERO prices from CoinGecko:", error.message);
+    console.log("⚠️  Falling back to 1 AERO = 1 USD\n");
+    return new Map<number, number>();
+  }
+}
+
+// Find closest AERO price for a given timestamp
+function getAeroPrice(priceMap: Map<number, number>, timestamp: string): number {
+  if (priceMap.size === 0) {
+    return 1.0; // Fallback
+  }
+  
+  const targetUnix = Math.floor(new Date(timestamp).getTime() / 1000);
+  
+  // Find the closest price point
+  let closestTime = 0;
+  let closestPrice = 1.0;
+  let minDiff = Infinity;
+  
+  for (const [time, price] of priceMap) {
+    const diff = Math.abs(time - targetUnix);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closestTime = time;
+      closestPrice = price;
     }
   }
   
-  console.log(`    ✗ No swap found`);
-  return null;
+  return closestPrice;
 }
 
 async function main() {
@@ -345,14 +387,42 @@ async function main() {
   );
   
   console.log(`Processing ${filteredActions.length} relevant actions...`);
-  console.log();
+  
+  // Determine block range for swap fetching and timestamp range for AERO prices
+  let minBlock = Infinity;
+  let maxBlock = -Infinity;
+  let minTimestamp = filteredActions[0]?.timestamp || "";
+  let maxTimestamp = filteredActions[0]?.timestamp || "";
+  
+  for (const action of filteredActions) {
+    if (action.block_number < minBlock) minBlock = action.block_number;
+    if (action.block_number > maxBlock) maxBlock = action.block_number;
+    if (action.timestamp < minTimestamp) minTimestamp = action.timestamp;
+    if (action.timestamp > maxTimestamp) maxTimestamp = action.timestamp;
+  }
+  
+  // Fetch all swaps once (with some buffer for finding nearby swaps)
+  const BUFFER = 50000; // Buffer to ensure we find swaps before/after edge actions
+  const swapsCache = await fetchAllSwapsInRange(
+    Math.max(0, minBlock - BUFFER),
+    maxBlock + BUFFER
+  );
+  
+  // Fetch AERO prices from CoinGecko
+  const aeroPriceMap = await fetchAeroPrices(minTimestamp, maxTimestamp);
+  
+  console.log(`Processing actions with cached swaps...\n`);
   
   const outputRows: OutputRow[] = [];
   const failed: Array<{ action: ActionRow; reason: string }> = [];
   
   for (let i = 0; i < filteredActions.length; i++) {
     const action = filteredActions[i];
-    console.log(`[${i + 1}/${filteredActions.length}] Processing ${action.action} at block ${action.block_number}...`);
+    
+    // Log progress every 100 actions instead of every action
+    if (i % 100 === 0 || i === filteredActions.length - 1) {
+      console.log(`[${i + 1}/${filteredActions.length}] Processing actions...`);
+    }
     
     try {
       let swapEvent: SwapEvent | null = null;
@@ -360,44 +430,44 @@ async function main() {
       // For mint: find swap before
       // For others: find swap after
       if (action.action === "mint") {
-        swapEvent = await findClosestSwapBefore(action.block_number, action.log_index);
+        swapEvent = findClosestSwapBeforeFromCache(swapsCache, action.block_number, action.log_index);
       } else {
-        swapEvent = await findClosestSwapAfter(action.block_number, action.log_index);
+        swapEvent = findClosestSwapAfterFromCache(swapsCache, action.block_number, action.log_index);
       }
       
       if (!swapEvent) {
-        console.log(`  ⚠ Skipping - no suitable swap found`);
         failed.push({ action, reason: "no_swap_found" });
         continue;
       }
       
       const cbBtcPrice = calculateCbBtcPrice(swapEvent.sqrtPriceX96);
-      console.log(`  Price: $${cbBtcPrice.toFixed(2)} per cbBTC`);
       
       // Get reward from earnings map
       let reward = 0;
       let inferredTokenId = action.token_id;
       
       if (action.action === "gauge_getReward" && !action.token_id) {
-        // Try to infer token_id from active position amounts
-        const getRewardData = getRewardByTimestamp.get(action.timestamp);
+        // Infer token_id by looking at adjacent actions in the same transaction
+        // gauge_getReward typically happens with gauge_withdraw or burn in the same tx
         
-        if (getRewardData && getRewardData.inpos0 > 0 && getRewardData.inpos1 > 0) {
-          // Find which position has matching amounts (with small tolerance for rounding)
-          const tolerance = 0.00001;
+        // Look backwards and forwards in the filtered actions array
+        for (let offset = -5; offset <= 5; offset++) {
+          if (offset === 0) continue; // Skip current action
           
-          for (const [tokenId, amounts] of positionAmounts) {
-            const amount0Match = Math.abs(amounts.amount0 - getRewardData.inpos0) < tolerance;
-            const amount1Match = Math.abs(amounts.amount1 - getRewardData.inpos1) < tolerance;
+          const neighborIndex = i + offset;
+          if (neighborIndex >= 0 && neighborIndex < filteredActions.length) {
+            const neighbor = filteredActions[neighborIndex];
             
-            if (amount0Match && amount1Match && amounts.timestamp <= action.timestamp) {
-              inferredTokenId = tokenId;
-              console.log(`    → Inferred token_id ${tokenId} for gauge_getReward based on inpos amounts`);
+            // If same timestamp and has token_id, use it
+            if (neighbor.timestamp === action.timestamp && neighbor.token_id) {
+              inferredTokenId = neighbor.token_id;
               break;
             }
           }
         }
         
+        // Get reward from earnings
+        const getRewardData = getRewardByTimestamp.get(action.timestamp);
         reward = getRewardData?.reward || 0;
       } else {
         const earningsKey = `${action.timestamp}|${action.action}|${action.token_id}`;
@@ -407,7 +477,8 @@ async function main() {
       // Calculate USD values
       const amount0_usd = action.amount0_dec; // USDC is 1:1 with USD
       const amount1_usd = action.amount1_dec * cbBtcPrice;
-      const reward_usd = reward; // Assuming 1 AERO = 1 USD
+      const aeroPrice = getAeroPrice(aeroPriceMap, action.timestamp);
+      const reward_usd = reward * aeroPrice; // Real AERO price from CoinGecko
       
       outputRows.push({
         timestamp: action.timestamp,
@@ -432,15 +503,12 @@ async function main() {
         amount1_usd: amount1_usd,
         AERO_usd: reward_usd,
       });
-      
-      console.log(`  ✓ Successfully processed`);
     } catch (error: any) {
-      console.error(`  ✗ Error: ${error.message}`);
       failed.push({ action, reason: error.message });
     }
-    
-    console.log();
   }
+  
+  console.log();
   
   // Create output directory
   const outputDir = path.join(__dirname, "..", "output");
@@ -514,4 +582,5 @@ main().catch((error) => {
   console.error("Fatal error:", error);
   process.exit(1);
 });
+
 
