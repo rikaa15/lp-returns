@@ -73,6 +73,7 @@ interface OutputRow {
   token_id: string;
   action: string;
   cbBTC_price: number;
+  AERO_price: number;
   tick_lower: string;
   tick_upper: string;
   amount0_dec: number;
@@ -492,6 +493,7 @@ async function main() {
         token_id: inferredTokenId, // Use inferred token_id for gauge_getReward
         action: action.action,
         cbBTC_price: cbBtcPrice,
+        AERO_price: aeroPrice,
         tick_lower: action.tick_lower,
         tick_upper: action.tick_upper,
         amount0_dec: action.amount0_dec,
@@ -532,6 +534,7 @@ async function main() {
         "token_id",
         "action",
         "cbBTC_price",
+        "AERO_price",
         "tick_lower",
         "tick_upper",
         "amount0_dec",
@@ -545,7 +548,7 @@ async function main() {
       ],
     });
     
-    const outputPath = path.join(outputDir, "lp_analysis.csv");
+    const outputPath = path.join(outputDir, "transaction_details.csv");
     fs.writeFileSync(outputPath, outputCsv, "utf-8");
     
     console.log("=".repeat(60));

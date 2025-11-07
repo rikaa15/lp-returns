@@ -23,20 +23,20 @@ Analyze liquidity pool returns for Aerodrome's USDC-cbBTC pool (0x4e962BB3889Bf0
 
 ## Usage
 
-**Step 1: Generate LP Analysis CSV**
+**Step 1: Generate Transaction Details CSV**
 ```bash
 npm start
 ```
 
-This combines data from `actions.csv` + `earnings_per_action.csv`, fetches cbBTC prices from on-chain swap events, and generates `output/lp_analysis.csv`.
+This combines data from `actions.csv` + `earnings_per_action.csv`, fetches cbBTC prices from on-chain swap events, and generates `output/transaction_details.csv`.
 
 **Step 2: Calculate Summary Statistics**
 ```bash
 npm run analyze
 ```
 
-This reads the LP analysis CSV and calculates comprehensive return metrics, generating:
-- `output/analysis_summary.csv` - Position aggregated statistics
+This reads the transaction details CSV and calculates comprehensive return metrics, generating:
+- `output/analysis_by_position.csv` - Position-by-position breakdown with wallet totals
 - `output/analysis_by_day.csv` - Daily aggregated statistics
 
 ## Input Files
@@ -62,7 +62,9 @@ Contains reward data with columns:
 
 ## Output
 
-The script generates `output/lp_analysis.csv` with:
+### transaction_details.csv
+
+The main script generates `output/transaction_details.csv` with:
 - **timestamp** - Original timestamp
 - **timestamp_excel** - Excel-readable format (YYYY-MM-DD HH:MM)
 - **tx_hash** - Transaction hash
@@ -74,15 +76,22 @@ The script generates `output/lp_analysis.csv` with:
 - **token_id** - Position NFT ID
 - **event_type** - Action type (mint, burn, collect, gauge_getReward)
 - **cbBTC_price** - cbBTC price in USDC
+- **AERO_price** - AERO price in USD (from CoinGecko API)
 - **tick_lower**, **tick_upper** - Position tick range
 - **amount0_dec**, **amount1_dec** - Token amounts
 - **fee0_dec**, **fee1_dec** - Collected fees
 - **reward** - AERO rewards
 - **amount0_usd** - USD value of USDC (1:1)
 - **amount1_usd** - USD value of cbBTC
-- **reward_usd** - USD value of AERO rewards (assumes 1:1)
+- **AERO_usd** - USD value of AERO rewards (from CoinGecko API)
 
-If any actions fail to process, they'll be logged in `output/failed_actions.csv`.
+### analysis_by_position.csv
+
+Position-by-position breakdown with comprehensive metrics for each LP position, plus a wallet summary row at the end. Includes deposit/withdrawal details, fees, rewards, IL, profit, and XIRR for each position.
+
+### analysis_by_day.csv
+
+Daily aggregated statistics showing positions opened/closed, deposits, withdrawals, fees, and AERO rewards collected each day, with a summary row at the end.
 
 ## Price Logic
 
@@ -106,11 +115,11 @@ Each row represents one day of trading activity:
 - **withdraw_usdc / withdraw_cbbtc**: Total withdrawn that day
 - **withdraw_value_usd**: Total USD value of withdrawals
 - **fees_collected_usd**: Trading fees collected that day
-- **aero_rewards_collected**: AERO rewards earned that day
-- **daily_profit_usd**: Daily profit (fees + rewards)
+- **aero_rewards_collected**: AERO rewards earned that day (in USD)
+- **daily_income_usd**: Daily income from fees + rewards (Note: This is NOT the same as true profit - see `profit_usd` in `analysis_by_position.csv` which accounts for IL and price changes)
 
 ### Wallet-Level Statistics
-- **positions_count**: Number of unique LP positions
+- **positions_count**: Number of unique LP positions (only positions that have been closed)
 - **events_count**: Total number of events processed
 - **total_deposit_usdc**: Total USDC deposited across all mints
 - **total_deposit_cbbtc**: Total cbBTC deposited across all mints
@@ -120,6 +129,7 @@ Each row represents one day of trading activity:
 - **total_collected_aero_rewards**: Total AERO rewards earned
 - **total_impermanent_loss_usd**: Total impermanent loss
 - **total_profit_usd**: Total profit/loss in USD
+- **xirr**: Portfolio XIRR (annualized return rate as %)
 
 ### Profit Calculation Formula
 ```
@@ -135,3 +145,31 @@ lpValueAtExit = withdraw_usdc + (withdraw_cbbtc × btc_price_at_burn)
 impermanent_loss = lpValueAtExit - hodlValueAtExit
 ```
 
+### XIRR (Extended Internal Rate of Return)
+
+The analysis calculates XIRR for both individual positions and the overall wallet portfolio. XIRR is the annualized rate of return that accounts for the timing and size of all cash flows.
+
+**Position-Level XIRR:**
+- Calculated for each closed position (with at least one mint and one burn)
+- Treats mints as negative cash flows (capital deployed)
+- Treats burns, fee collections, and rewards as positive cash flows (returns)
+- Returns annualized rate as a percentage (e.g., 15.5%)
+
+**Wallet-Level XIRR:**
+- Aggregates all cash flows across the entire portfolio
+- Only calculated when all positions are closed
+- Shows "N/A" if there are open positions with deployed capital
+
+**Cash Flow Model:**
+```
+Mints:      -deposit_value_usd  (outflow at mint timestamp)
+Burns:      +withdrawal_value_usd  (inflow at burn timestamp)
+Collects:   +fees_usd  (inflow at collect timestamp)
+Rewards:    +AERO_usd  (inflow at reward timestamp)
+```
+
+**Calculation Method:**
+Uses Newton method to solve for the rate `r` where Net Present Value (NPV) = 0:
+```
+NPV = Σ (cash_flow_i / (1 + r)^(days_i / 365))
+```

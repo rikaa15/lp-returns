@@ -38,6 +38,7 @@ interface PositionStats {
   first_mint_timestamp: Date | null;
   total_deposit_usdc: number;
   total_deposit_cbbtc: number;
+  total_deposit_usd: number; // USD value at deposit time (using each mint's own price)
   btc_price_at_first_mint: number;
   
   // Burn data
@@ -45,6 +46,7 @@ interface PositionStats {
   first_burn_timestamp: Date | null;
   total_withdraw_usdc: number;
   total_withdraw_cbbtc: number;
+  total_withdraw_usd: number; // USD value at withdrawal time (using each burn's own price)
   btc_price_at_first_burn: number;
   
   // Rewards and fees
@@ -55,6 +57,7 @@ interface PositionStats {
   active_time_seconds: number;
   impermanent_loss_usd: number;
   profit_usd: number;
+  xirr: number | null; // Annualized return rate (XIRR)
 }
 
 interface WalletStats {
@@ -70,6 +73,10 @@ interface WalletStats {
   total_collected_aero_rewards_usd: number; // USD value
   total_impermanent_loss_usd: number;
   total_profit_usd: number;
+  xirr: number | null; // Portfolio XIRR
+  avg_capital_deployed_usd: number; // Average capital deployed over the period
+  apr: number | null; // Annualized percentage return
+  days_active: number; // Number of days in the period
 }
 
 interface DailyStats {
@@ -85,7 +92,73 @@ interface DailyStats {
   withdraw_value_usd: number;
   fees_collected_usd: number;
   aero_rewards_collected: number;
-  daily_profit_usd: number; // fees + rewards for that day
+  daily_income_usd: number; // fees + rewards collected that day (not full profit - doesn't account for IL/price changes)
+  capital_deployed_usd: number; // Net capital deployed at end of day (cumulative deposits - withdrawals)
+}
+
+interface CashFlow {
+  date: Date;
+  amount: number; // negative for outflows (deposits), positive for inflows (withdrawals, fees, rewards)
+}
+
+// Calculate XIRR (Extended Internal Rate of Return) using Newton-Raphson method
+// Returns annualized rate as a percentage (e.g., 15.5 for 15.5% APR)
+function calculateXIRR(cashFlows: CashFlow[], maxIterations = 100, tolerance = 1e-6): number | null {
+  if (cashFlows.length < 2) {
+    return null; // Need at least 2 cash flows
+  }
+
+  // Sort by date
+  const sorted = [...cashFlows].sort((a, b) => a.date.getTime() - b.date.getTime());
+  
+  // Check if we have both inflows and outflows
+  const hasOutflow = sorted.some(cf => cf.amount < 0);
+  const hasInflow = sorted.some(cf => cf.amount > 0);
+  
+  if (!hasOutflow || !hasInflow) {
+    return null; // Need both deposits and returns
+  }
+
+  const firstDate = sorted[0].date.getTime();
+  
+  // Calculate days from first cash flow for each transaction
+  const daysFromStart = sorted.map(cf => (cf.date.getTime() - firstDate) / (1000 * 60 * 60 * 24));
+  
+  // Initial guess: 10% annualized
+  let rate = 0.1;
+  
+  // Newton-Raphson iteration
+  for (let i = 0; i < maxIterations; i++) {
+    let npv = 0;
+    let dnpv = 0; // Derivative of NPV
+    
+    for (let j = 0; j < sorted.length; j++) {
+      const years = daysFromStart[j] / 365;
+      const discountFactor = Math.pow(1 + rate, -years);
+      
+      npv += sorted[j].amount * discountFactor;
+      dnpv += -years * sorted[j].amount * discountFactor / (1 + rate);
+    }
+    
+    // Check convergence
+    if (Math.abs(npv) < tolerance) {
+      return rate * 100; // Convert to percentage
+    }
+    
+    // Newton-Raphson update
+    if (dnpv === 0) {
+      return null; // Can't converge
+    }
+    
+    rate = rate - npv / dnpv;
+    
+    // Prevent rate from going too negative or too high
+    if (rate < -0.99) rate = -0.99;
+    if (rate > 10) rate = 10; // Cap at 1000% to prevent overflow
+  }
+  
+  // If we didn't converge, return null
+  return null;
 }
 
 function calculatePositionStats(rows: AnalysisRow[]): PositionStats {
@@ -184,6 +257,50 @@ function calculatePositionStats(rows: AnalysisRow[]): PositionStats {
     profit_usd = (lpValueAtExitUSD - hodlValueAtDepositUSD) + collectedRewardsAmountUSD;
   }
   
+  // Calculate XIRR (Extended Internal Rate of Return)
+  // Build cash flows: deposits are negative (outflows), returns are positive (inflows)
+  const cashFlows: CashFlow[] = [];
+  
+  // Add mints as negative cash flows (capital deployed)
+  mints.forEach(mint => {
+    cashFlows.push({
+      date: new Date(mint.timestamp),
+      amount: -(mint.amount0_usd + mint.amount1_usd),
+    });
+  });
+  
+  // Add burns as positive cash flows (capital returned)
+  burns.forEach(burn => {
+    cashFlows.push({
+      date: new Date(burn.timestamp),
+      amount: burn.amount0_usd + burn.amount1_usd,
+    });
+  });
+  
+  // Add fee collections as positive cash flows (income)
+  collects.forEach(collect => {
+    const feeValue = collect.fee0_dec + (collect.fee1_dec * collect.cbBTC_price);
+    if (feeValue > 0) {
+      cashFlows.push({
+        date: new Date(collect.timestamp),
+        amount: feeValue,
+      });
+    }
+  });
+  
+  // Add AERO rewards as positive cash flows (income) - excluding gauge_getReward
+  rows
+    .filter(r => r.action !== "gauge_getReward" && r.AERO_usd > 0)
+    .forEach(row => {
+      cashFlows.push({
+        date: new Date(row.timestamp),
+        amount: row.AERO_usd,
+      });
+    });
+  
+  // Calculate XIRR
+  const xirr = calculateXIRR(cashFlows);
+  
   return {
     token_id,
     events_count: rows.length,
@@ -191,17 +308,20 @@ function calculatePositionStats(rows: AnalysisRow[]): PositionStats {
     first_mint_timestamp: first_mint ? new Date(first_mint.timestamp) : null,
     total_deposit_usdc,
     total_deposit_cbbtc,
+    total_deposit_usd,
     btc_price_at_first_mint,
     burn_count: burns.length,
     first_burn_timestamp: first_burn ? new Date(first_burn.timestamp) : null,
     total_withdraw_usdc,
     total_withdraw_cbbtc,
+    total_withdraw_usd,
     btc_price_at_first_burn,
     total_fees_usd,
     total_aero_rewards,
     active_time_seconds,
     impermanent_loss_usd,
     profit_usd,
+    xirr,
   };
 }
 
@@ -239,9 +359,9 @@ function calculateDailyStats(rows: AnalysisRow[]): DailyStats[] {
     
     const aero_rewards_collected = dayRows.reduce((sum, r) => sum + r.AERO_usd, 0);
     
-    // Daily profit = fees + rewards (simple calculation for daily view)
-    // Now using real AERO prices from CoinGecko
-    const daily_profit_usd = fees_collected_usd + aero_rewards_collected;
+    // Daily income = fees + rewards collected that day
+    // Note: This doesn't account for IL or price changes (see profit_usd in analysis_by_position.csv for true profit)
+    const daily_income_usd = fees_collected_usd + aero_rewards_collected;
     
     dailyStats.push({
       date,
@@ -256,12 +376,20 @@ function calculateDailyStats(rows: AnalysisRow[]): DailyStats[] {
       withdraw_value_usd,
       fees_collected_usd,
       aero_rewards_collected,
-      daily_profit_usd,
+      daily_income_usd,
+      capital_deployed_usd: 0, // Will be calculated after sorting
     });
   }
   
   // Sort by date
   dailyStats.sort((a, b) => a.date.localeCompare(b.date));
+  
+  // Calculate cumulative capital deployed for each day
+  let cumulativeCapital = 0;
+  for (const day of dailyStats) {
+    cumulativeCapital += day.deposit_value_usd - day.withdraw_value_usd;
+    day.capital_deployed_usd = cumulativeCapital;
+  }
   
   return dailyStats;
 }
@@ -285,7 +413,7 @@ async function main() {
   console.log("=".repeat(60));
   
   // Read the analysis CSV
-  const csvPath = path.join(__dirname, "..", "output", "lp_analysis.csv");
+  const csvPath = path.join(__dirname, "..", "output", "transaction_details.csv");
   
   if (!fs.existsSync(csvPath)) {
     console.error(`Error: ${csvPath} not found. Please run the main script first.`);
@@ -371,6 +499,13 @@ async function main() {
   // For AERO USD, sum from all events (position-specific + gauge_getReward)
   const allAeroRewardsUsd = rows.reduce((sum, r) => sum + r.AERO_usd, 0);
   
+  // Calculate average capital deployed and APR
+  const avg_capital_deployed_usd = dailyStats.length > 0
+    ? dailyStats.reduce((sum, d) => sum + d.capital_deployed_usd, 0) / dailyStats.length
+    : 0;
+  
+  const days_active = dailyStats.length;
+  
   const walletStats: WalletStats = {
     positions_count: positionMap.size,
     events_count: rows.length,
@@ -386,6 +521,10 @@ async function main() {
     total_collected_aero_rewards_usd: allAeroRewardsUsd,
     total_impermanent_loss_usd: positionStats.reduce((sum, p) => sum + p.impermanent_loss_usd, 0),
     total_profit_usd: positionStats.reduce((sum, p) => sum + p.profit_usd, 0),
+    xirr: null, // Will be calculated below
+    avg_capital_deployed_usd,
+    apr: null, // Will be calculated below
+    days_active,
   };
   
   // Add gauge_getReward rewards to token count (wallet-level, not position-specific)
@@ -393,6 +532,59 @@ async function main() {
     .filter(r => r.action === "gauge_getReward")
     .reduce((sum, e) => sum + e.reward, 0);
   walletStats.total_collected_aero_rewards += gaugeRewards;
+  
+  // Add gauge_getReward AERO rewards (USD) to wallet profit
+  const gaugeRewardsUsd = rows
+    .filter(r => r.action === "gauge_getReward")
+    .reduce((sum, e) => sum + e.AERO_usd, 0);
+  walletStats.total_profit_usd += gaugeRewardsUsd;
+  
+  // Calculate wallet-level XIRR from all cash flows
+  const walletCashFlows: CashFlow[] = [];
+  
+  // Add all mints as negative cash flows
+  rows.filter(r => r.action === "mint").forEach(mint => {
+    walletCashFlows.push({
+      date: new Date(mint.timestamp),
+      amount: -(mint.amount0_usd + mint.amount1_usd),
+    });
+  });
+  
+  // Add all burns as positive cash flows
+  rows.filter(r => r.action === "burn").forEach(burn => {
+    walletCashFlows.push({
+      date: new Date(burn.timestamp),
+      amount: burn.amount0_usd + burn.amount1_usd,
+    });
+  });
+  
+  // Add all fee collections as positive cash flows
+  rows.filter(r => r.action === "collect").forEach(collect => {
+    const feeValue = collect.fee0_dec + (collect.fee1_dec * collect.cbBTC_price);
+    if (feeValue > 0) {
+      walletCashFlows.push({
+        date: new Date(collect.timestamp),
+        amount: feeValue,
+      });
+    }
+  });
+  
+  // Add all AERO rewards as positive cash flows (including gauge_getReward)
+  rows.filter(r => r.AERO_usd > 0).forEach(row => {
+    walletCashFlows.push({
+      date: new Date(row.timestamp),
+      amount: row.AERO_usd,
+    });
+  });
+  
+  // Calculate wallet XIRR (only from closed positions)
+  walletStats.xirr = calculateXIRR(walletCashFlows);
+  
+  // Calculate APR (simple annualized return)
+  if (walletStats.avg_capital_deployed_usd > 0 && walletStats.days_active > 0) {
+    const periodReturn = walletStats.total_profit_usd / walletStats.avg_capital_deployed_usd;
+    walletStats.apr = (periodReturn * 365 / walletStats.days_active) * 100; // Convert to percentage
+  }
   
   // Calculate net position changes
   const usdcChange = walletStats.total_withdraw_usdc - walletStats.total_deposit_usdc;
@@ -417,16 +609,17 @@ async function main() {
       total_deposit_usdc: pos.total_deposit_usdc,
       total_deposit_cbbtc: pos.total_deposit_cbbtc,
       btc_price_at_deposit: pos.btc_price_at_first_mint,
-      deposit_value_usd: pos.total_deposit_usdc + (pos.total_deposit_cbbtc * pos.btc_price_at_first_mint),
+      deposit_value_usd: pos.total_deposit_usd,
       total_withdraw_usdc: pos.total_withdraw_usdc,
       total_withdraw_cbbtc: pos.total_withdraw_cbbtc,
       btc_price_at_withdrawal: pos.btc_price_at_first_burn,
-      withdrawal_value_usd: pos.total_withdraw_usdc + (pos.total_withdraw_cbbtc * pos.btc_price_at_first_burn),
+      withdrawal_value_usd: pos.total_withdraw_usd,
       net_usdc_change: "",
       net_cbbtc_change: "",
       total_fees_usd: pos.total_fees_usd,
       impermanent_loss_usd: pos.impermanent_loss_usd,
       profit_usd: pos.profit_usd,
+      xirr: pos.xirr !== null ? pos.xirr : "",
     })),
     // Wallet summary row at the end (AERO excluded - see analysis_by_day.csv for wallet-level AERO)
     {
@@ -442,16 +635,17 @@ async function main() {
       total_deposit_usdc: walletStats.total_deposit_usdc,
       total_deposit_cbbtc: walletStats.total_deposit_cbbtc,
       btc_price_at_deposit: "",
-      deposit_value_usd: "",
+      deposit_value_usd: positionStats.reduce((sum, p) => sum + p.total_deposit_usd, 0),
       total_withdraw_usdc: walletStats.total_withdraw_usdc,
       total_withdraw_cbbtc: walletStats.total_withdraw_cbbtc,
       btc_price_at_withdrawal: "",
-      withdrawal_value_usd: "",
+      withdrawal_value_usd: positionStats.reduce((sum, p) => sum + p.total_withdraw_usd, 0),
       net_usdc_change: usdcChange,
       net_cbbtc_change: cbbtcChange,
       total_fees_usd: walletStats.total_fees_usd,
       impermanent_loss_usd: walletStats.total_impermanent_loss_usd,
       profit_usd: walletStats.total_profit_usd,
+      xirr: walletStats.xirr !== null ? walletStats.xirr : "",
     }
   ];
   
@@ -459,7 +653,7 @@ async function main() {
     header: true,
   });
   
-  const summaryPath = path.join(outputDir, "analysis_summary.csv");
+  const summaryPath = path.join(outputDir, "analysis_by_position.csv");
   fs.writeFileSync(summaryPath, combinedCsv, "utf-8");
   
   // Add summary row to daily stats
@@ -476,7 +670,7 @@ async function main() {
     withdraw_value_usd: dailyStats.reduce((sum, d) => sum + d.withdraw_value_usd, 0),
     fees_collected_usd: dailyStats.reduce((sum, d) => sum + d.fees_collected_usd, 0),
     aero_rewards_collected: dailyStats.reduce((sum, d) => sum + d.aero_rewards_collected, 0),
-    daily_profit_usd: dailyStats.reduce((sum, d) => sum + d.daily_profit_usd, 0),
+    daily_income_usd: dailyStats.reduce((sum, d) => sum + d.daily_income_usd, 0),
   };
   
   // Export daily stats CSV with summary row at the end
@@ -493,12 +687,16 @@ async function main() {
   console.log("=".repeat(60));
   console.log(`Positions:           ${walletStats.positions_count}`);
   console.log(`Total Events:        ${walletStats.events_count}`);
+  console.log(`Days Active:         ${walletStats.days_active}`);
+  console.log(`Avg Capital Deployed: $${walletStats.avg_capital_deployed_usd.toFixed(2)}`);
   console.log(`Total Fees:          $${walletStats.total_fees_usd.toFixed(2)}`);
   console.log(`AERO Rewards:        ${walletStats.total_collected_aero_rewards.toFixed(4)} AERO ($${walletStats.total_collected_aero_rewards_usd.toFixed(2)})`);
   console.log(`Impermanent Loss:    $${walletStats.total_impermanent_loss_usd.toFixed(2)}`);
   console.log(`Total Profit:        $${walletStats.total_profit_usd.toFixed(2)}`);
+  console.log(`APR:                 ${walletStats.apr !== null ? walletStats.apr.toFixed(2) + '%' : 'N/A'}`);
+  console.log(`Portfolio XIRR:      ${walletStats.xirr !== null ? walletStats.xirr.toFixed(2) + '%' : 'N/A'}`);
   console.log("=".repeat(60));
-  console.log(`\n✓ Analysis summary written to: ${summaryPath}`);
+  console.log(`\n✓ Position analysis written to: ${summaryPath}`);
   console.log(`✓ Daily analysis written to: ${dailyPath}`);
   console.log("\nDone!");
 }
