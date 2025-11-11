@@ -487,40 +487,86 @@ async function main() {
     console.log();
   }
   
+  // Report position breakdown
+  const completePositionsCount = positionStats.filter(p => p.mint_count > 0 && p.burn_count > 0).length;
+  const preExistingCount = positionStats.filter(p => p.mint_count === 0 && p.burn_count > 0).length;
+  const unclosedPositionsCount = positionStats.filter(p => p.mint_count > 0 && p.burn_count === 0).length;
+  const excludedCount = preExistingCount + unclosedPositionsCount;
+  
+  console.log(`\nPosition Breakdown: ${completePositionsCount} complete, ${excludedCount} excluded`);
+  if (preExistingCount > 0) {
+    console.log(`  ⚠️  ${preExistingCount} pre-existing position(s) (opened before observation) excluded`);
+  }
+  if (unclosedPositionsCount > 0) {
+    console.log(`  ⚠️  ${unclosedPositionsCount} unclosed position(s) (still open) excluded`);
+  }
+  
   // Calculate daily stats
   console.log("\n" + "=".repeat(60));
   console.log("CALCULATING DAILY STATISTICS");
   console.log("=".repeat(60) + "\n");
   
-  const dailyStats = calculateDailyStats(rows);
-  console.log(`Calculated stats for ${dailyStats.length} days\n`);
+  // Filter rows to only include events from COMPLETE positions (both opened AND closed during observation)
+  const completePositionTokenIds = new Set(
+    positionStats.filter(p => p.mint_count > 0 && p.burn_count > 0).map(p => p.token_id)
+  );
+  const rowsFromCompletePositions = rows.filter(r => 
+    !r.token_id || r.token_id === "" || completePositionTokenIds.has(r.token_id)
+  );
+  
+  const dailyStats = calculateDailyStats(rowsFromCompletePositions);
+  console.log(`Calculated stats for ${dailyStats.length} days (using ${rowsFromCompletePositions.length} events from complete positions only)\n`);
   
   // Calculate wallet-level aggregated stats
-  // For AERO USD, sum from all events (position-specific + gauge_getReward)
-  const allAeroRewardsUsd = rows.reduce((sum, r) => sum + r.AERO_usd, 0);
+  // For AERO USD, sum from all events from COMPLETE positions only (position-specific + gauge_getReward)
+  const allAeroRewardsUsd = rowsFromCompletePositions.reduce((sum, r) => sum + r.AERO_usd, 0);
   
-  // Calculate average capital deployed and APR
-  const avg_capital_deployed_usd = dailyStats.length > 0
-    ? dailyStats.reduce((sum, d) => sum + d.capital_deployed_usd, 0) / dailyStats.length
+  // Calculate average capital deployed from COMPLETE positions only
+  // For APR calculation, we only want to consider capital that has completed its cycle within observation period
+  const completePositionsOnly = positionStats.filter(p => p.mint_count > 0 && p.burn_count > 0);
+  const totalDepositsCompletePositions = completePositionsOnly.reduce((sum, p) => sum + p.total_deposit_usd, 0);
+  const totalWithdrawalsCompletePositions = completePositionsOnly.reduce((sum, p) => sum + p.total_withdraw_usd, 0);
+  
+  // Avg capital = average of what was deployed across the period
+  // Simple approximation: (total deposits + total withdrawals) / 2
+  const avg_capital_deployed_usd = completePositionsOnly.length > 0
+    ? (totalDepositsCompletePositions + totalWithdrawalsCompletePositions) / 2
     : 0;
   
-  const days_active = dailyStats.length;
+  // Calculate actual operating time from earliest to latest transaction (complete positions only)
+  let days_active = dailyStats.length; // Default to calendar days
+  if (rowsFromCompletePositions.length >= 2) {
+    // Find the absolute earliest and latest timestamps across all events in complete positions
+    const timestamps = rowsFromCompletePositions.map(r => new Date(r.timestamp).getTime());
+    const earliestTimestamp = Math.min(...timestamps);
+    const latestTimestamp = Math.max(...timestamps);
+    const actualMilliseconds = latestTimestamp - earliestTimestamp;
+    days_active = actualMilliseconds / (1000 * 60 * 60 * 24); // Convert to days
+    
+    // Ensure we have a minimum time period to avoid division by zero or unrealistic APRs
+    if (days_active < 0.001) { // Less than ~1.5 minutes
+      days_active = dailyStats.length; // Fall back to calendar days
+    }
+  }
+  
+  // Filter to only complete positions (both opened AND closed) for wallet-level calculations
+  const completePositions = positionStats.filter(p => p.mint_count > 0 && p.burn_count > 0);
   
   const walletStats: WalletStats = {
-    positions_count: positionMap.size,
-    events_count: rows.length,
-    total_deposit_usdc: positionStats.reduce((sum, p) => sum + p.total_deposit_usdc, 0),
-    total_deposit_cbbtc: positionStats.reduce((sum, p) => sum + p.total_deposit_cbbtc, 0),
-    total_withdraw_usdc: positionStats.reduce((sum, p) => sum + p.total_withdraw_usdc, 0),
-    total_withdraw_cbbtc: positionStats.reduce((sum, p) => sum + p.total_withdraw_cbbtc, 0),
-    avg_active_time_seconds: positionStats.length > 0
-      ? positionStats.reduce((sum, p) => sum + p.active_time_seconds, 0) / positionStats.length
+    positions_count: completePositions.length, // Only count complete positions
+    events_count: rowsFromCompletePositions.length, // Only count events from complete positions
+    total_deposit_usdc: completePositions.reduce((sum, p) => sum + p.total_deposit_usdc, 0),
+    total_deposit_cbbtc: completePositions.reduce((sum, p) => sum + p.total_deposit_cbbtc, 0),
+    total_withdraw_usdc: completePositions.reduce((sum, p) => sum + p.total_withdraw_usdc, 0),
+    total_withdraw_cbbtc: completePositions.reduce((sum, p) => sum + p.total_withdraw_cbbtc, 0),
+    avg_active_time_seconds: completePositions.length > 0
+      ? completePositions.reduce((sum, p) => sum + p.active_time_seconds, 0) / completePositions.length
       : 0,
-    total_fees_usd: positionStats.reduce((sum, p) => sum + p.total_fees_usd, 0),
-    total_collected_aero_rewards: positionStats.reduce((sum, p) => sum + p.total_aero_rewards, 0),
+    total_fees_usd: completePositions.reduce((sum, p) => sum + p.total_fees_usd, 0),
+    total_collected_aero_rewards: completePositions.reduce((sum, p) => sum + p.total_aero_rewards, 0),
     total_collected_aero_rewards_usd: allAeroRewardsUsd,
-    total_impermanent_loss_usd: positionStats.reduce((sum, p) => sum + p.impermanent_loss_usd, 0),
-    total_profit_usd: positionStats.reduce((sum, p) => sum + p.profit_usd, 0),
+    total_impermanent_loss_usd: completePositions.reduce((sum, p) => sum + p.impermanent_loss_usd, 0),
+    total_profit_usd: completePositions.reduce((sum, p) => sum + p.profit_usd, 0),
     xirr: null, // Will be calculated below
     avg_capital_deployed_usd,
     apr: null, // Will be calculated below
@@ -528,38 +574,40 @@ async function main() {
   };
   
   // Add gauge_getReward rewards to token count (wallet-level, not position-specific)
-  const gaugeRewards = rows
+  // Only from complete positions
+  const gaugeRewards = rowsFromCompletePositions
     .filter(r => r.action === "gauge_getReward")
     .reduce((sum, e) => sum + e.reward, 0);
   walletStats.total_collected_aero_rewards += gaugeRewards;
   
   // Add gauge_getReward AERO rewards (USD) to wallet profit
-  const gaugeRewardsUsd = rows
+  // Only from complete positions
+  const gaugeRewardsUsd = rowsFromCompletePositions
     .filter(r => r.action === "gauge_getReward")
     .reduce((sum, e) => sum + e.AERO_usd, 0);
   walletStats.total_profit_usd += gaugeRewardsUsd;
   
-  // Calculate wallet-level XIRR from all cash flows
+  // Calculate wallet-level XIRR from cash flows of COMPLETE positions only
   const walletCashFlows: CashFlow[] = [];
   
-  // Add all mints as negative cash flows
-  rows.filter(r => r.action === "mint").forEach(mint => {
+  // Add all mints as negative cash flows (complete positions only)
+  rowsFromCompletePositions.filter(r => r.action === "mint").forEach(mint => {
     walletCashFlows.push({
       date: new Date(mint.timestamp),
       amount: -(mint.amount0_usd + mint.amount1_usd),
     });
   });
   
-  // Add all burns as positive cash flows
-  rows.filter(r => r.action === "burn").forEach(burn => {
+  // Add all burns as positive cash flows (complete positions only)
+  rowsFromCompletePositions.filter(r => r.action === "burn").forEach(burn => {
     walletCashFlows.push({
       date: new Date(burn.timestamp),
       amount: burn.amount0_usd + burn.amount1_usd,
     });
   });
   
-  // Add all fee collections as positive cash flows
-  rows.filter(r => r.action === "collect").forEach(collect => {
+  // Add all fee collections as positive cash flows (complete positions only)
+  rowsFromCompletePositions.filter(r => r.action === "collect").forEach(collect => {
     const feeValue = collect.fee0_dec + (collect.fee1_dec * collect.cbBTC_price);
     if (feeValue > 0) {
       walletCashFlows.push({
@@ -569,8 +617,8 @@ async function main() {
     }
   });
   
-  // Add all AERO rewards as positive cash flows (including gauge_getReward)
-  rows.filter(r => r.AERO_usd > 0).forEach(row => {
+  // Add all AERO rewards as positive cash flows (complete positions only, including gauge_getReward)
+  rowsFromCompletePositions.filter(r => r.AERO_usd > 0).forEach(row => {
     walletCashFlows.push({
       date: new Date(row.timestamp),
       amount: row.AERO_usd,
@@ -593,10 +641,11 @@ async function main() {
   // Create output directory
   const outputDir = path.join(__dirname, "..", "output");
   
-  // Generate combined summary CSV with positions + wallet summary at the end
+  // Generate combined summary CSV with COMPLETE positions only + wallet summary at the end
+  // Pre-existing and unclosed positions are filtered out from the analysis files
   const combinedCsvData = [
-    // Position rows
-    ...positionStats.map(pos => ({
+    // Position rows (complete positions only - both opened AND closed during observation)
+    ...completePositions.map(pos => ({
       row_type: "position",
       token_id: pos.token_id,
       positions_count: "",
@@ -635,11 +684,11 @@ async function main() {
       total_deposit_usdc: walletStats.total_deposit_usdc,
       total_deposit_cbbtc: walletStats.total_deposit_cbbtc,
       btc_price_at_deposit: "",
-      deposit_value_usd: positionStats.reduce((sum, p) => sum + p.total_deposit_usd, 0),
+      deposit_value_usd: completePositions.reduce((sum, p) => sum + p.total_deposit_usd, 0),
       total_withdraw_usdc: walletStats.total_withdraw_usdc,
       total_withdraw_cbbtc: walletStats.total_withdraw_cbbtc,
       btc_price_at_withdrawal: "",
-      withdrawal_value_usd: positionStats.reduce((sum, p) => sum + p.total_withdraw_usd, 0),
+      withdrawal_value_usd: completePositions.reduce((sum, p) => sum + p.total_withdraw_usd, 0),
       net_usdc_change: usdcChange,
       net_cbbtc_change: cbbtcChange,
       total_fees_usd: walletStats.total_fees_usd,
@@ -682,12 +731,29 @@ async function main() {
   const dailyPath = path.join(outputDir, "analysis_by_day.csv");
   fs.writeFileSync(dailyPath, dailyCsv, "utf-8");
   
+  // Format operating time for display
+  const formatOperatingTime = (days: number): string => {
+    const totalHours = days * 24;
+    const hours = Math.floor(totalHours);
+    const minutes = Math.floor((totalHours - hours) * 60);
+    const seconds = Math.floor(((totalHours - hours) * 60 - minutes) * 60);
+    
+    if (hours > 24) {
+      const displayDays = Math.floor(hours / 24);
+      const remainingHours = hours % 24;
+      return `${displayDays}d ${remainingHours}h ${minutes}m`;
+    }
+    return `${hours}h ${minutes}m ${seconds}s`;
+  };
+  
+  const excludedPositionCount = positionStats.length - completePositions.length;
+  
   console.log("=".repeat(60));
   console.log("SUMMARY");
   console.log("=".repeat(60));
-  console.log(`Positions:           ${walletStats.positions_count}`);
+  console.log(`Complete Positions:  ${walletStats.positions_count}` + (excludedPositionCount > 0 ? ` (${excludedPositionCount} excluded: ${preExistingCount} pre-existing, ${unclosedPositionsCount} still open)` : ''));
   console.log(`Total Events:        ${walletStats.events_count}`);
-  console.log(`Days Active:         ${walletStats.days_active}`);
+  console.log(`Operating Time:      ${formatOperatingTime(walletStats.days_active)} (${walletStats.days_active.toFixed(4)} days)`);
   console.log(`Avg Capital Deployed: $${walletStats.avg_capital_deployed_usd.toFixed(2)}`);
   console.log(`Total Fees:          $${walletStats.total_fees_usd.toFixed(2)}`);
   console.log(`AERO Rewards:        ${walletStats.total_collected_aero_rewards.toFixed(4)} AERO ($${walletStats.total_collected_aero_rewards_usd.toFixed(2)})`);

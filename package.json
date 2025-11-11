@@ -6,6 +6,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "analyze": "tsx src/analyze.ts",
+    "comparison": "tsx src/compare.ts",
     "build": "tsc",
     "dev": "tsx watch src/index.ts"
   },

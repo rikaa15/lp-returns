@@ -1,0 +1,660 @@
+import * as fs from "fs";
+import * as path from "path";
+import { parse } from "csv-parse/sync";
+import { stringify } from "csv-stringify/sync";
+
+interface AnalysisRow {
+  row_type: string;
+  token_id: string;
+  positions_count: string;
+  events_count: string;
+  active_time_seconds: string;
+  total_deposit_usdc: string;
+  total_deposit_cbbtc: string;
+  deposit_value_usd: string;
+  total_withdraw_usdc: string;
+  total_withdraw_cbbtc: string;
+  withdrawal_value_usd: string;
+  net_usdc_change: string;
+  net_cbbtc_change: string;
+  total_fees_usd: string;
+  impermanent_loss_usd: string;
+  profit_usd: string;
+  xirr: string;
+  [key: string]: string;
+}
+
+interface DailyRow {
+  date: string;
+  events_count: string;
+  positions_opened: string;
+  positions_closed: string;
+  deposit_usdc: string;
+  deposit_cbbtc: string;
+  deposit_value_usd: string;
+  withdraw_usdc: string;
+  withdraw_cbbtc: string;
+  withdraw_value_usd: string;
+  fees_collected_usd: string;
+  aero_rewards_collected: string;
+  daily_income_usd: string;
+  capital_deployed_usd: string;
+}
+
+function formatNumber(value: number, decimals: number = 2): string {
+  return value.toLocaleString('en-US', { 
+    minimumFractionDigits: decimals, 
+    maximumFractionDigits: decimals 
+  });
+}
+
+function formatDuration(days: number): string {
+  const totalHours = days * 24;
+  const hours = Math.floor(totalHours);
+  const minutes = Math.floor((totalHours - hours) * 60);
+  const seconds = Math.floor(((totalHours - hours) * 60 - minutes) * 60);
+  return `${hours}h ${minutes}m ${seconds}s`;
+}
+
+function calculateRatio(val1: number, val2: number): string {
+  if (val2 === 0) return "N/A";
+  const ratio = val1 / val2;
+  if (ratio >= 1000) return `${formatNumber(ratio, 0)}x`;
+  if (ratio >= 10) return `${formatNumber(ratio, 0)}x`;
+  if (ratio >= 1) return `${formatNumber(ratio, 2)}x`;
+  if (ratio >= 0.01) return `${formatNumber(ratio, 2)}x`;
+  // For very small ratios, show with 4 decimal places
+  if (ratio < 0.01 && ratio > 0) return `${ratio.toFixed(4)}x`;
+  return `${formatNumber(ratio, 2)}x`;
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  
+  if (args.length !== 2) {
+    console.error("Usage: npm run comparison <label1> <label2>");
+    console.error("Example: npm run comparison 0xa8a5_11-10 0x71d8_11-10");
+    process.exit(1);
+  }
+  
+  const label1 = args[0];
+  const label2 = args[1];
+  
+  const outputDir = path.join(__dirname, "..", "output");
+  
+  // Prepare output file
+  const outputFilename = `comparison_${label1}_${label2}.csv`;
+  const outputPath = path.join(outputDir, outputFilename);
+  
+  // CSV data array
+  const csvData: any[] = [];
+  
+  // Read analysis files
+  const file1Position = path.join(outputDir, `analysis_by_position_${label1}.csv`);
+  const file2Position = path.join(outputDir, `analysis_by_position_${label2}.csv`);
+  const file1Daily = path.join(outputDir, `analysis_by_day_${label1}.csv`);
+  const file2Daily = path.join(outputDir, `analysis_by_day_${label2}.csv`);
+  const file1TransactionDetails = path.join(outputDir, `transaction_details_${label1}.csv`);
+  const file2TransactionDetails = path.join(outputDir, `transaction_details_${label2}.csv`);
+  
+  if (!fs.existsSync(file1Position) || !fs.existsSync(file2Position)) {
+    console.error("Error: Analysis files not found");
+    console.error(`  Looking for: ${file1Position}`);
+    console.error(`  Looking for: ${file2Position}`);
+    process.exit(1);
+  }
+  
+  // Parse position analysis
+  const data1Position: AnalysisRow[] = parse(fs.readFileSync(file1Position, "utf-8"), {
+    columns: true,
+    skip_empty_lines: true
+  });
+  
+  const data2Position: AnalysisRow[] = parse(fs.readFileSync(file2Position, "utf-8"), {
+    columns: true,
+    skip_empty_lines: true
+  });
+  
+  // Parse daily analysis
+  const data1Daily: DailyRow[] = parse(fs.readFileSync(file1Daily, "utf-8"), {
+    columns: true,
+    skip_empty_lines: true
+  });
+  
+  const data2Daily: DailyRow[] = parse(fs.readFileSync(file2Daily, "utf-8"), {
+    columns: true,
+    skip_empty_lines: true
+  });
+  
+  // Get wallet summary rows
+  const wallet1 = data1Position.find(r => r.row_type === "wallet_summary");
+  const wallet2 = data2Position.find(r => r.row_type === "wallet_summary");
+  
+  if (!wallet1 || !wallet2) {
+    console.error("Error: Could not find wallet_summary rows");
+    process.exit(1);
+  }
+  
+  // Get daily data (first non-TOTAL row)
+  const daily1 = data1Daily[0];
+  const daily2 = data2Daily[0];
+  
+  // Calculate excluded positions by reading transaction details
+  const calculateExcludedPositions = (transactionFile: string): { 
+    excluded: number, 
+    total: number,
+    preExisting: number,
+    unclosed: number
+  } => {
+    if (!fs.existsSync(transactionFile)) {
+      return { excluded: 0, total: 0, preExisting: 0, unclosed: 0 };
+    }
+    
+    const txData: any[] = parse(fs.readFileSync(transactionFile, "utf-8"), {
+      columns: true,
+      skip_empty_lines: true
+    });
+    
+    // Group by token_id to determine position status
+    const positionMap = new Map<string, { hasMint: boolean, hasBurn: boolean }>();
+    
+    for (const row of txData) {
+      if (!row.token_id || row.token_id === "") continue;
+      
+      if (!positionMap.has(row.token_id)) {
+        positionMap.set(row.token_id, { hasMint: false, hasBurn: false });
+      }
+      
+      const pos = positionMap.get(row.token_id)!;
+      if (row.action === "mint") pos.hasMint = true;
+      if (row.action === "burn") pos.hasBurn = true;
+    }
+    
+    let completeCount = 0;
+    let preExistingCount = 0;  // burn only (opened before observation)
+    let unclosedCount = 0;      // mint only (still open)
+    
+    for (const [_, status] of positionMap) {
+      if (status.hasMint && status.hasBurn) {
+        completeCount++;
+      } else if (status.hasBurn && !status.hasMint) {
+        preExistingCount++;
+      } else if (status.hasMint && !status.hasBurn) {
+        unclosedCount++;
+      }
+    }
+    
+    return { 
+      excluded: preExistingCount + unclosedCount, 
+      total: completeCount + preExistingCount + unclosedCount,
+      preExisting: preExistingCount,
+      unclosed: unclosedCount
+    };
+  };
+  
+  const excluded1Data = calculateExcludedPositions(file1TransactionDetails);
+  const excluded2Data = calculateExcludedPositions(file2TransactionDetails);
+  
+  // Calculate metrics
+  const positions1 = parseInt(wallet1.positions_count);
+  const positions2 = parseInt(wallet2.positions_count);
+  const events1 = parseInt(wallet1.events_count);
+  const events2 = parseInt(wallet2.events_count);
+  const avgTime1 = parseFloat(wallet1.active_time_seconds);
+  const avgTime2 = parseFloat(wallet2.active_time_seconds);
+  
+  const excluded1 = excluded1Data.excluded;
+  const excluded2 = excluded2Data.excluded;
+  const preExisting1 = excluded1Data.preExisting;
+  const preExisting2 = excluded2Data.preExisting;
+  const unclosed1 = excluded1Data.unclosed;
+  const unclosed2 = excluded2Data.unclosed;
+  
+  // Calculate APR (need to derive from data)
+  const depositValue1 = parseFloat(wallet1.deposit_value_usd);
+  const depositValue2 = parseFloat(wallet2.deposit_value_usd);
+  const withdrawValue1 = parseFloat(wallet1.withdrawal_value_usd);
+  const withdrawValue2 = parseFloat(wallet2.withdrawal_value_usd);
+  const avgCapital1 = (depositValue1 + withdrawValue1) / 2;
+  const avgCapital2 = (depositValue2 + withdrawValue2) / 2;
+  
+  const profit1 = parseFloat(wallet1.profit_usd);
+  const profit2 = parseFloat(wallet2.profit_usd);
+  
+  // Calculate operating time from daily stats
+  const positionsOpened1 = parseInt(daily1.positions_opened);
+  const positionsOpened2 = parseInt(daily2.positions_opened);
+  const positionsClosed1 = parseInt(daily1.positions_closed);
+  const positionsClosed2 = parseInt(daily2.positions_closed);
+  
+  const depositUsdc1 = parseFloat(wallet1.total_deposit_usdc);
+  const depositUsdc2 = parseFloat(wallet2.total_deposit_usdc);
+  const depositCbbtc1 = parseFloat(wallet1.total_deposit_cbbtc);
+  const depositCbbtc2 = parseFloat(wallet2.total_deposit_cbbtc);
+  
+  const withdrawUsdc1 = parseFloat(wallet1.total_withdraw_usdc);
+  const withdrawUsdc2 = parseFloat(wallet2.total_withdraw_usdc);
+  const withdrawCbbtc1 = parseFloat(wallet1.total_withdraw_cbbtc);
+  const withdrawCbbtc2 = parseFloat(wallet2.total_withdraw_cbbtc);
+  
+  const netUsdc1 = parseFloat(wallet1.net_usdc_change);
+  const netUsdc2 = parseFloat(wallet2.net_usdc_change);
+  const netCbbtc1 = parseFloat(wallet1.net_cbbtc_change);
+  const netCbbtc2 = parseFloat(wallet2.net_cbbtc_change);
+  
+  const aeroRewards1 = parseFloat(daily1.aero_rewards_collected);
+  const aeroRewards2 = parseFloat(daily2.aero_rewards_collected);
+  
+  const fees1 = parseFloat(wallet1.total_fees_usd);
+  const fees2 = parseFloat(wallet2.total_fees_usd);
+  
+  const il1 = parseFloat(wallet1.impermanent_loss_usd);
+  const il2 = parseFloat(wallet2.impermanent_loss_usd);
+  
+  // AERO per $1M capital
+  const aeroPerMillion1 = (aeroRewards1 / avgCapital1) * 1_000_000;
+  const aeroPerMillion2 = (aeroRewards2 / avgCapital2) * 1_000_000;
+  
+  
+  // Calculate operating time (assuming ~2.3 hours from 0.0954 days)
+  const operatingDays = 0.0954; // This should ideally come from the summary output
+  
+  // Calculate capital ratio (baseline for scalable metrics)
+  const capitalRatio = avgCapital1 / avgCapital2;
+  
+  // Helper function to calculate ratio vs expected
+  const calculateVsExpected = (actualRatio: string, expectedRatio: number): string => {
+    if (actualRatio === "-" || actualRatio === "N/A" || actualRatio === "Same") return "-";
+    
+    // Extract numeric value from ratio string (e.g., "0.0012x" -> 0.0012)
+    const numericRatio = parseFloat(actualRatio.replace('x', ''));
+    if (isNaN(numericRatio)) return "-";
+    
+    const ratioVsExpected = numericRatio / expectedRatio;
+    
+    // Format with appropriate precision
+    if (ratioVsExpected >= 10) return `${ratioVsExpected.toFixed(1)}x`;
+    if (ratioVsExpected >= 1) return `${ratioVsExpected.toFixed(2)}x`;
+    if (ratioVsExpected >= 0.01) return `${ratioVsExpected.toFixed(2)}x`;
+    return `${ratioVsExpected.toFixed(4)}x`;
+  };
+  
+  // Build CSV data
+  // Positions & Activity
+  csvData.push({
+    metric: "BASELINE",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  csvData.push({
+    metric: "Capital Ratio (baseline for scalable metrics)",
+    [label1]: "1.00x",
+    [label2]: (1 / capitalRatio).toFixed(2) + "x",
+    ratio: capitalRatio.toFixed(4) + "x",
+    vs_expected: "1.00x"
+  });
+  
+  csvData.push({
+    metric: "POSITIONS & ACTIVITY",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  const posRatio = calculateRatio(positions1, positions2);
+  csvData.push({
+    metric: "Complete Positions",
+    [label1]: positions1,
+    [label2]: positions2,
+    ratio: posRatio,
+    vs_expected: calculateVsExpected(posRatio, 1.0) // Should be ~1.0x (efficiency)
+  });
+  csvData.push({
+    metric: "Excluded - Pre-existing (burn only)",
+    [label1]: preExisting1,
+    [label2]: preExisting2,
+    ratio: "-",
+    vs_expected: "-"
+  });
+  csvData.push({
+    metric: "Excluded - Unclosed (mint only)",
+    [label1]: unclosed1,
+    [label2]: unclosed2,
+    ratio: "-",
+    vs_expected: "-"
+  });
+  const eventsRatio = calculateRatio(events1, events2);
+  csvData.push({
+    metric: "Total Events (Complete)",
+    [label1]: events1,
+    [label2]: events2,
+    ratio: eventsRatio,
+    vs_expected: calculateVsExpected(eventsRatio, 1.0) // Should be ~1.0x (efficiency)
+  });
+  csvData.push({
+    metric: "Operating Time",
+    [label1]: formatDuration(operatingDays),
+    [label2]: formatDuration(operatingDays),
+    ratio: "Same",
+    vs_expected: "-"
+  });
+  const durationRatio = calculateRatio(avgTime1, avgTime2);
+  csvData.push({
+    metric: "Avg Position Duration (seconds)",
+    [label1]: avgTime1.toFixed(1),
+    [label2]: avgTime2.toFixed(1),
+    ratio: durationRatio,
+    vs_expected: calculateVsExpected(durationRatio, 1.0) // Should be ~1.0x (efficiency)
+  });
+  
+  // Add per-position metrics
+  const eventsPerPos1 = events1 / positions1;
+  const eventsPerPos2 = events2 / positions2;
+  const eventsPerPosRatio = calculateRatio(eventsPerPos1, eventsPerPos2);
+  csvData.push({
+    metric: "Events per Position",
+    [label1]: eventsPerPos1.toFixed(2),
+    [label2]: eventsPerPos2.toFixed(2),
+    ratio: eventsPerPosRatio,
+    vs_expected: calculateVsExpected(eventsPerPosRatio, 1.0) // Should be ~1.0x (efficiency)
+  });
+  
+  const posPerHour1 = positions1 / (operatingDays * 24);
+  const posPerHour2 = positions2 / (operatingDays * 24);
+  const posPerHourRatio = calculateRatio(posPerHour1, posPerHour2);
+  csvData.push({
+    metric: "Positions per Hour",
+    [label1]: posPerHour1.toFixed(2),
+    [label2]: posPerHour2.toFixed(2),
+    ratio: posPerHourRatio,
+    vs_expected: calculateVsExpected(posPerHourRatio, 1.0) // Should be ~1.0x (efficiency)
+  });
+  
+  // Capital Deployed
+  csvData.push({
+    metric: "CAPITAL DEPLOYED",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  const depositRatio = calculateRatio(depositValue1, depositValue2);
+  csvData.push({
+    metric: "Total Deposits (USD)",
+    [label1]: depositValue1.toFixed(2),
+    [label2]: depositValue2.toFixed(2),
+    ratio: depositRatio,
+    vs_expected: calculateVsExpected(depositRatio, capitalRatio) // Should match capital ratio
+  });
+  const usdcDepRatio = calculateRatio(depositUsdc1, depositUsdc2);
+  csvData.push({
+    metric: "USDC Deposited",
+    [label1]: depositUsdc1.toFixed(2),
+    [label2]: depositUsdc2.toFixed(2),
+    ratio: usdcDepRatio,
+    vs_expected: calculateVsExpected(usdcDepRatio, capitalRatio) // Should match capital ratio
+  });
+  const btcDepRatio = calculateRatio(depositCbbtc1, depositCbbtc2);
+  csvData.push({
+    metric: "cbBTC Deposited",
+    [label1]: depositCbbtc1.toFixed(6),
+    [label2]: depositCbbtc2.toFixed(6),
+    ratio: btcDepRatio,
+    vs_expected: calculateVsExpected(btcDepRatio, capitalRatio) // Should match capital ratio
+  });
+  const avgCapRatio = calculateRatio(avgCapital1, avgCapital2);
+  csvData.push({
+    metric: "Avg Capital Deployed (USD)",
+    [label1]: avgCapital1.toFixed(2),
+    [label2]: avgCapital2.toFixed(2),
+    ratio: avgCapRatio,
+    vs_expected: calculateVsExpected(avgCapRatio, capitalRatio) // Should match capital ratio
+  });
+  
+  // Token allocation ratios
+  const usdcBtcRatio1 = depositUsdc1 / depositCbbtc1;
+  const usdcBtcRatio2 = depositUsdc2 / depositCbbtc2;
+  const tokenAllocRatio = calculateRatio(usdcBtcRatio1, usdcBtcRatio2);
+  csvData.push({
+    metric: "USDC/cbBTC Deposit Ratio",
+    [label1]: usdcBtcRatio1.toFixed(2),
+    [label2]: usdcBtcRatio2.toFixed(2),
+    ratio: tokenAllocRatio,
+    vs_expected: calculateVsExpected(tokenAllocRatio, 1.0) // Should be ~1.0x (same strategy)
+  });
+  
+  // Per-position deposit metrics
+  const avgDepositPerPos1 = depositValue1 / positions1;
+  const avgDepositPerPos2 = depositValue2 / positions2;
+  const avgDepPosRatio = calculateRatio(avgDepositPerPos1, avgDepositPerPos2);
+  csvData.push({
+    metric: "Avg Deposit per Position (USD)",
+    [label1]: avgDepositPerPos1.toFixed(2),
+    [label2]: avgDepositPerPos2.toFixed(2),
+    ratio: avgDepPosRatio,
+    vs_expected: calculateVsExpected(avgDepPosRatio, capitalRatio) // Should match capital ratio
+  });
+  
+  // Withdrawals
+  csvData.push({
+    metric: "WITHDRAWALS",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  const withdrawRatio = calculateRatio(withdrawValue1, withdrawValue2);
+  csvData.push({
+    metric: "Total Withdrawals (USD)",
+    [label1]: withdrawValue1.toFixed(2),
+    [label2]: withdrawValue2.toFixed(2),
+    ratio: withdrawRatio,
+    vs_expected: calculateVsExpected(withdrawRatio, capitalRatio)
+  });
+  const usdcWithRatio = calculateRatio(withdrawUsdc1, withdrawUsdc2);
+  csvData.push({
+    metric: "USDC Withdrawn",
+    [label1]: withdrawUsdc1.toFixed(2),
+    [label2]: withdrawUsdc2.toFixed(2),
+    ratio: usdcWithRatio,
+    vs_expected: calculateVsExpected(usdcWithRatio, capitalRatio)
+  });
+  const btcWithRatio = calculateRatio(withdrawCbbtc1, withdrawCbbtc2);
+  csvData.push({
+    metric: "cbBTC Withdrawn",
+    [label1]: withdrawCbbtc1.toFixed(6),
+    [label2]: withdrawCbbtc2.toFixed(6),
+    ratio: btcWithRatio,
+    vs_expected: calculateVsExpected(btcWithRatio, capitalRatio)
+  });
+  
+  // Net Changes
+  csvData.push({
+    metric: "NET CHANGES",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  const netUsdcRatio = calculateRatio(Math.abs(netUsdc1), Math.abs(netUsdc2));
+  csvData.push({
+    metric: "Net USDC",
+    [label1]: netUsdc1.toFixed(2),
+    [label2]: netUsdc2.toFixed(2),
+    ratio: netUsdcRatio,
+    vs_expected: calculateVsExpected(netUsdcRatio, capitalRatio)
+  });
+  const netBtcRatio = calculateRatio(Math.abs(netCbbtc1), Math.abs(netCbbtc2));
+  csvData.push({
+    metric: "Net cbBTC",
+    [label1]: netCbbtc1.toFixed(6),
+    [label2]: netCbbtc2.toFixed(6),
+    ratio: netBtcRatio,
+    vs_expected: calculateVsExpected(netBtcRatio, capitalRatio)
+  });
+  
+  // Rewards & Fees
+  csvData.push({
+    metric: "REWARDS & FEES",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  csvData.push({
+    metric: "Trading Fees (USD)",
+    [label1]: fees1.toFixed(2),
+    [label2]: fees2.toFixed(2),
+    ratio: "-",
+    vs_expected: "-"
+  });
+  const aeroRatio = calculateRatio(aeroRewards1, aeroRewards2);
+  csvData.push({
+    metric: "AERO Value (USD)",
+    [label1]: aeroRewards1.toFixed(2),
+    [label2]: aeroRewards2.toFixed(2),
+    ratio: aeroRatio,
+    vs_expected: calculateVsExpected(aeroRatio, capitalRatio)
+  });
+  const aeroPerMilRatio = calculateRatio(aeroPerMillion1, aeroPerMillion2);
+  csvData.push({
+    metric: "AERO per $1M Capital (USD)",
+    [label1]: aeroPerMillion1.toFixed(2),
+    [label2]: aeroPerMillion2.toFixed(2),
+    ratio: aeroPerMilRatio,
+    vs_expected: calculateVsExpected(aeroPerMilRatio, 1.0)
+  });
+  
+  // Per-position AERO metrics
+  const aeroPerPos1 = aeroRewards1 / positions1;
+  const aeroPerPos2 = aeroRewards2 / positions2;
+  const aeroPosRatio = calculateRatio(aeroPerPos1, aeroPerPos2);
+  csvData.push({
+    metric: "AERO per Position (USD)",
+    [label1]: aeroPerPos1.toFixed(4),
+    [label2]: aeroPerPos2.toFixed(4),
+    ratio: aeroPosRatio,
+    vs_expected: calculateVsExpected(aeroPosRatio, capitalRatio)
+  });
+  
+  // Impermanent Loss
+  csvData.push({
+    metric: "IMPERMANENT LOSS",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  const ilRatio = calculateRatio(Math.abs(il1), Math.abs(il2));
+  csvData.push({
+    metric: "IL (USD)",
+    [label1]: il1.toFixed(2),
+    [label2]: il2.toFixed(2),
+    ratio: ilRatio,
+    vs_expected: calculateVsExpected(ilRatio, capitalRatio)
+  });
+  const ilPct1 = (il1 / avgCapital1) * 100;
+  const ilPct2 = (il2 / avgCapital2) * 100;
+  const ilPctRatio = calculateRatio(Math.abs(ilPct1), Math.abs(ilPct2));
+  csvData.push({
+    metric: "IL as % of Capital",
+    [label1]: ilPct1.toFixed(6),
+    [label2]: ilPct2.toFixed(6),
+    ratio: ilPctRatio,
+    vs_expected: calculateVsExpected(ilPctRatio, 1.0)
+  });
+  
+  // Profitability
+  csvData.push({
+    metric: "PROFITABILITY",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  const profitRatio = calculateRatio(Math.abs(profit1), Math.abs(profit2));
+  csvData.push({
+    metric: "Total Profit/Loss (USD)",
+    [label1]: profit1.toFixed(2),
+    [label2]: profit2.toFixed(2),
+    ratio: profitRatio,
+    vs_expected: calculateVsExpected(profitRatio, capitalRatio)
+  });
+  const profitPct1 = (profit1 / avgCapital1) * 100;
+  const profitPct2 = (profit2 / avgCapital2) * 100;
+  const profitPctRatio = calculateRatio(Math.abs(profitPct1), Math.abs(profitPct2));
+  csvData.push({
+    metric: "Profit % of Capital",
+    [label1]: profitPct1.toFixed(6),
+    [label2]: profitPct2.toFixed(6),
+    ratio: profitPctRatio,
+    vs_expected: calculateVsExpected(profitPctRatio, 1.0)
+  });
+  
+  // Calculate APR
+  const apr1 = (profit1 / avgCapital1) * (365 / operatingDays) * 100;
+  const apr2 = (profit2 / avgCapital2) * (365 / operatingDays) * 100;
+  
+  // Annualized Returns
+  csvData.push({
+    metric: "ANNUALIZED RETURNS",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  const aprRatio = calculateRatio(Math.abs(apr1), Math.abs(apr2));
+  csvData.push({
+    metric: "APR (%)",
+    [label1]: apr1.toFixed(2),
+    [label2]: apr2.toFixed(2),
+    ratio: aprRatio,
+    vs_expected: calculateVsExpected(aprRatio, 1.0)
+  });
+  
+  const xirr1 = wallet1.xirr ? parseFloat(wallet1.xirr).toFixed(2) : "N/A";
+  const xirr2 = wallet2.xirr ? parseFloat(wallet2.xirr).toFixed(2) : "N/A";
+  csvData.push({
+    metric: "Portfolio XIRR (%)",
+    [label1]: xirr1,
+    [label2]: xirr2,
+    ratio: "-",
+    vs_expected: "-"
+  });
+  
+  // Performance gap
+  const perfGap = Math.abs(apr1 - apr2);
+  const winner = apr1 > apr2 ? label1 : label2;
+  csvData.push({
+    metric: "Performance Gap (pp)",
+    [label1]: perfGap.toFixed(2),
+    [label2]: `Winner: ${winner}`,
+    ratio: "-",
+    vs_expected: "-"
+  });
+  
+  // Write to CSV file
+  const csvOutput = stringify(csvData, {
+    header: true,
+    columns: [
+      { key: 'metric', header: 'Metric' },
+      { key: label1, header: label1 },
+      { key: label2, header: label2 },
+      { key: 'ratio', header: `Ratio (${label1}/${label2})` },
+      { key: 'vs_expected', header: 'vs Expected (Ratio/Expected)' }
+    ]
+  });
+  
+  fs.writeFileSync(outputPath, csvOutput, "utf-8");
+  
+  console.log(`\nComparison saved to: ${outputPath}`);
+  console.log(`Total metrics compared: ${csvData.length}`);
+}
+
+main().catch(error => {
+  console.error("Error:", error.message);
+  process.exit(1);
+});
+
