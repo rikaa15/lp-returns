@@ -37,6 +37,8 @@ Analyze liquidity pool returns for Aerodrome's USDC-cbBTC pool (0x4e962BB3889Bf0
        └── 0xAddress3/
    ```
    
+   **Note:** The directory structure is preserved in git, but CSV files are ignored.
+   
    Output mirrors the input structure:
    ```
    output/
