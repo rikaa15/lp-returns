@@ -4,9 +4,12 @@
   "description": "Analyze LP returns for Aerodrome USDC-cbBTC pool",
   "main": "index.js",
   "scripts": {
+    "compare-copy": "tsx src/compare.ts",
+    "compare-topwallets": "tsx src/batch-analyze.ts",
     "start": "tsx src/index.ts",
     "analyze": "tsx src/analyze.ts",
     "comparison": "tsx src/compare.ts",
+    "batch": "tsx src/batch-analyze.ts",
     "build": "tsc",
     "dev": "tsx watch src/index.ts"
   },

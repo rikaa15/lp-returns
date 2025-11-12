@@ -412,8 +412,57 @@ async function main() {
   console.log("LP Returns Analysis - Calculating Summary Statistics");
   console.log("=".repeat(60));
   
-  // Read the analysis CSV
-  const csvPath = path.join(__dirname, "..", "output", "transaction_details.csv");
+  // Read the analysis CSV from command line or default location
+  const args = process.argv.slice(2);
+  let csvPath: string;
+  let summaryOutputPath: string;
+  let dailyOutputPath: string;
+  let walletType: "copywallet" | "targetwallet" = "copywallet";
+  
+  if (args.length >= 3) {
+    // Batch mode or explicit paths provided
+    csvPath = args[0];
+    summaryOutputPath = args[1];
+    dailyOutputPath = args[2];
+  } else {
+    // Default mode: use copywallet-comparison structure
+    // Check if user specified targetwallet or copywallet (default: copywallet)
+    if (args.length === 1 && (args[0] === "targetwallet" || args[0] === "copywallet")) {
+      walletType = args[0];
+    }
+    
+    const outputBaseDir = path.join(__dirname, "..", "output", "copywallet-comparison", walletType);
+    
+    // Ensure output directory exists
+    if (!fs.existsSync(outputBaseDir)) {
+      fs.mkdirSync(outputBaseDir, { recursive: true });
+    }
+    
+    // Find the transaction_details file
+    if (!fs.existsSync(outputBaseDir)) {
+      console.error(`Error: Output directory not found: ${outputBaseDir}`);
+      console.error(`Please run 'npm start ${walletType}' first to generate transaction details.`);
+      process.exit(1);
+    }
+    
+    const files = fs.readdirSync(outputBaseDir);
+    const transactionFile = files.find(f => f.startsWith("transaction_details_") && f.endsWith(".csv"));
+    
+    if (!transactionFile) {
+      console.error(`Error: Missing transaction_details_*.csv in ${outputBaseDir}`);
+      console.error(`Please run 'npm start ${walletType}' first to generate transaction details.`);
+      process.exit(1);
+    }
+    
+    csvPath = path.join(outputBaseDir, transactionFile);
+    
+    // Extract label from filename
+    const label = transactionFile.replace("transaction_details_", "").replace(".csv", "");
+    summaryOutputPath = path.join(outputBaseDir, `analysis_by_position_${label}.csv`);
+    dailyOutputPath = path.join(outputBaseDir, `analysis_by_day_${label}.csv`);
+    
+    console.log(`Analyzing ${walletType}...`);
+  }
   
   if (!fs.existsSync(csvPath)) {
     console.error(`Error: ${csvPath} not found. Please run the main script first.`);
@@ -638,8 +687,11 @@ async function main() {
   const usdcChange = walletStats.total_withdraw_usdc - walletStats.total_deposit_usdc;
   const cbbtcChange = walletStats.total_withdraw_cbbtc - walletStats.total_deposit_cbbtc;
   
-  // Create output directory
-  const outputDir = path.join(__dirname, "..", "output");
+  // Ensure output directory exists
+  const outputDir = path.dirname(summaryOutputPath);
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
   
   // Generate combined summary CSV with COMPLETE positions only + wallet summary at the end
   // Pre-existing and unclosed positions are filtered out from the analysis files
@@ -702,8 +754,7 @@ async function main() {
     header: true,
   });
   
-  const summaryPath = path.join(outputDir, "analysis_by_position.csv");
-  fs.writeFileSync(summaryPath, combinedCsv, "utf-8");
+  fs.writeFileSync(summaryOutputPath, combinedCsv, "utf-8");
   
   // Add summary row to daily stats
   const dailySummary = {
@@ -728,8 +779,7 @@ async function main() {
     header: true,
   });
   
-  const dailyPath = path.join(outputDir, "analysis_by_day.csv");
-  fs.writeFileSync(dailyPath, dailyCsv, "utf-8");
+  fs.writeFileSync(dailyOutputPath, dailyCsv, "utf-8");
   
   // Format operating time for display
   const formatOperatingTime = (days: number): string => {
@@ -762,8 +812,8 @@ async function main() {
   console.log(`APR:                 ${walletStats.apr !== null ? walletStats.apr.toFixed(2) + '%' : 'N/A'}`);
   console.log(`Portfolio XIRR:      ${walletStats.xirr !== null ? walletStats.xirr.toFixed(2) + '%' : 'N/A'}`);
   console.log("=".repeat(60));
-  console.log(`\n✓ Position analysis written to: ${summaryPath}`);
-  console.log(`✓ Daily analysis written to: ${dailyPath}`);
+  console.log(`\n✓ Position analysis written to: ${summaryOutputPath}`);
+  console.log(`✓ Daily analysis written to: ${dailyOutputPath}`);
   console.log("\nDone!");
 }
 

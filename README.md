@@ -12,32 +12,177 @@ Analyze liquidity pool returns for Aerodrome's USDC-cbBTC pool (0x4e962BB3889Bf0
 2. **Configure environment:**
    Create a `.env` file in the project root:
    ```
-   BASE_RPC_URL=rpc
-   BASESCAN_API_KEY=api_key
+   BASE_RPC_URL=your_base_rpc_url
+   BASESCAN_API_KEY=your_basescan_api_key
    ```
 
-3. **Add input data:**
-   Place CSV files generated from timeline script in the `input/` directory:
-   - `actions.csv`
-   - `earnings_per_action.csv`
+3. **Organize input data:**
+   
+   The repo uses an organized folder structure for different analysis purposes:
+   
+   ```
+   input/
+   ├── copywallet-comparison/          # For comparing copy bot vs target wallet
+   │   ├── copywallet/
+   │   │   ├── actions_blocks_*.csv
+   │   │   └── earnings_per_action_blocks_*.csv
+   │   └── targetwallet/
+   │       ├── actions_blocks_*.csv
+   │       └── earnings_per_action_blocks_*.csv
+   └── topwallet-comparison/           # For batch analysis of multiple wallets
+       ├── 0xAddress1/
+       │   ├── actions_blocks_*.csv
+       │   └── earnings_per_action_blocks_*.csv
+       ├── 0xAddress2/
+       └── 0xAddress3/
+   ```
+   
+   Output mirrors the input structure:
+   ```
+   output/
+   ├── copywallet-comparison/
+   │   ├── copywallet/
+   │   ├── targetwallet/
+   │   └── comparison_*.csv
+   └── topwallet-comparison/
+       ├── 0xAddress1/
+       ├── 0xAddress2/
+       ├── 0xAddress3/
+       └── batch_comparison_blocks_*.csv
+   ```
 
 ## Usage
 
-**Step 1: Generate Transaction Details CSV**
+### Quick Start (Commands)
+
+This repo supports **two main workflows** - each with a **single command**:
+
+| Workflow | Purpose | Command | Output |
+|----------|---------|---------|--------|
+| **Compare Copy Bot** | Compare your copy bot vs target wallet | `npm run compare-copy` | `comparison_*.csv` |
+| **Compare Top Wallets** | Evaluate multiple wallets to find the best performer | `npm run compare-topwallets` | `batch_comparison_*.csv` |
+
+Both commands handle everything end-to-end: data processing, analysis, and comparison generation.
+
+---
+
+### Detailed Workflow Documentation
+
+#### 1. **Compare Top Wallets - Batch Analysis** 
+
+**Quick Command:**
 ```bash
-npm start
+npm run compare-topwallets
 ```
 
-This combines data from `actions.csv` + `earnings_per_action.csv`, fetches cbBTC prices from on-chain swap events, and generates `output/transaction_details.csv`.
+This single command will process all wallets and generate a comparison table automatically.
 
-**Step 2: Calculate Summary Statistics**
-```bash
-npm run analyze
+**Input Structure:**
+```
+input/topwallet-comparison/
+├── 0xAddress1/
+│   ├── actions_blocks_START_END.csv
+│   └── earnings_per_action_blocks_START_END.csv
+├── 0xAddress2/
+└── 0xAddress3/
 ```
 
-This reads the transaction details CSV and calculates comprehensive return metrics, generating:
-- `output/analysis_by_position.csv` - Position-by-position breakdown with wallet totals
-- `output/analysis_by_day.csv` - Daily aggregated statistics
+This will:
+- Process all addresses in `input/topwallet-comparison/` automatically
+- Generate individual analysis files for each address in `output/topwallet-comparison/{address}/`
+- Create a **comparison CSV** at `output/topwallet-comparison/batch_comparison_blocks_*.csv` showing all wallets side-by-side
+
+**Output:**
+- `output/topwallet-comparison/batch_comparison_blocks_*.csv` - **Side-by-side comparison with key metrics** (APR, profit, capital deployed, etc.)
+- `output/topwallet-comparison/{address}/transaction_details_*.csv` - Transaction details for each address
+- `output/topwallet-comparison/{address}/analysis_by_position_*.csv` - Position breakdown for each address
+- `output/topwallet-comparison/{address}/analysis_by_day_*.csv` - Daily stats for each address
+
+**Use Case:** Quickly identify the best performing wallets to copy by comparing APR, profit margins, and efficiency metrics.
+
+**Key Metrics in Batch Comparison:**
+- **ANALYSIS METADATA**: Block range, start/end times
+- **Complete Positions**: Number of positions opened and closed during the period
+- **Excluded Positions**: Pre-existing or still-open positions (not included in calculations)
+- **Operating Time**: Total time from first to last transaction
+- **Avg Position Duration**: Average time each position was held
+- **Total Deposits (USD)**: Total capital deployed
+- **AERO Rewards (USD)**: Staking rewards earned
+- **Impermanent Loss (USD)**: IL from price movements
+- **Total Profit/Loss (USD)**: Net profit including rewards and IL
+- **APR (%)**: Annualized return rate
+- **Portfolio XIRR (%)**: Time-weighted annualized return
+
+---
+
+#### 2. **Compare Copy Bot - Single Wallet Comparison**
+
+**Quick Command:**
+```bash
+npm run compare-copy
+# or
+npm run comparison  # (alias for backwards compatibility)
+```
+
+This single command will:
+1. Process copywallet data
+2. Analyze copywallet
+3. Process targetwallet data
+4. Analyze targetwallet
+5. Generate comparison report
+
+**Input Structure:**
+```
+input/copywallet-comparison/
+├── copywallet/
+│   ├── actions_blocks_*.csv
+│   └── earnings_per_action_blocks_*.csv
+└── targetwallet/
+    ├── actions_blocks_*.csv
+    └── earnings_per_action_blocks_*.csv
+```
+
+**Output:**
+- `output/copywallet-comparison/copywallet/` - Your copy bot analysis
+- `output/copywallet-comparison/targetwallet/` - Target wallet analysis
+- `output/copywallet-comparison/comparison_*.csv` - Side-by-side comparison with ratio analysis
+
+**Special Features:**
+- **Ratio Column**: Shows the ratio between the two wallets for each metric
+- **vs Expected Column**: Compares actual ratio to expected ratio
+  - For **scalable metrics** (deposits, profit, AERO rewards): Expected ratio = capital ratio
+  - For **efficiency metrics** (positions, APR, duration): Expected ratio = 1.0x
+- Helps identify if your copy bot is performing as expected given its capital size
+
+**Use Case:** Monitor if your copy bot is accurately replicating the target wallet's strategy and performance.
+
+---
+
+### Advanced Usage (Manual Step-by-Step)
+
+If you need more control, you can run individual steps:
+
+**For Copy Bot Comparison:**
+```bash
+# Process copywallet
+npm start copywallet
+npm run analyze copywallet
+
+# Process targetwallet
+npm start targetwallet
+npm run analyze targetwallet
+
+# Generate comparison only (without reprocessing)
+npm run comparison <label1> <label2>
+```
+
+**Individual Commands:**
+- `npm start [wallet]` - Process transaction data and fetch prices
+- `npm run analyze [wallet]` - Calculate summary statistics
+- `npm run comparison [label1] [label2]` - Compare two already-processed wallets (optional args)
+- `npm run batch` - Alias for `npm run compare-topwallets`
+
+---
 
 ## Input Files
 

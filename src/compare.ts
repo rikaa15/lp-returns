@@ -1,5 +1,11 @@
+/**
+ * End-to-end script to compare copywallet vs targetwallet
+ * Processes both wallets and generates a comparison report
+ */
+
 import * as fs from "fs";
 import * as path from "path";
+import { execSync } from "child_process";
 import { parse } from "csv-parse/sync";
 import { stringify } from "csv-stringify/sync";
 
@@ -71,31 +77,139 @@ function calculateRatio(val1: number, val2: number): string {
 async function main() {
   const args = process.argv.slice(2);
   
-  if (args.length !== 2) {
-    console.error("Usage: npm run comparison <label1> <label2>");
+  let label1: string;
+  let label2: string;
+  let file1Position: string;
+  let file2Position: string;
+  let file1Daily: string;
+  let file2Daily: string;
+  let file1TransactionDetails: string;
+  let file2TransactionDetails: string;
+  let outputPath: string;
+  
+  if (args.length === 0) {
+    // Default mode: End-to-end processing and comparison of copywallet vs targetwallet
+    console.log("=".repeat(80));
+    console.log("COPYWALLET VS TARGETWALLET COMPARISON");
+    console.log("=".repeat(80));
+    console.log("\nThis will process both wallets and generate a comparison report.\n");
+    
+    try {
+      // Step 1: Process copywallet
+      console.log("\n" + "=".repeat(80));
+      console.log("[1/5] Processing copywallet data...");
+      console.log("=".repeat(80));
+      execSync("tsx src/index.ts copywallet", { stdio: "inherit", cwd: path.join(__dirname, "..") });
+      
+      // Step 2: Analyze copywallet
+      console.log("\n" + "=".repeat(80));
+      console.log("[2/5] Analyzing copywallet...");
+      console.log("=".repeat(80));
+      execSync("tsx src/analyze.ts copywallet", { stdio: "inherit", cwd: path.join(__dirname, "..") });
+      
+      // Step 3: Process targetwallet
+      console.log("\n" + "=".repeat(80));
+      console.log("[3/5] Processing targetwallet data...");
+      console.log("=".repeat(80));
+      execSync("tsx src/index.ts targetwallet", { stdio: "inherit", cwd: path.join(__dirname, "..") });
+      
+      // Step 4: Analyze targetwallet
+      console.log("\n" + "=".repeat(80));
+      console.log("[4/5] Analyzing targetwallet...");
+      console.log("=".repeat(80));
+      execSync("tsx src/analyze.ts targetwallet", { stdio: "inherit", cwd: path.join(__dirname, "..") });
+      
+      // Step 5: Generate comparison
+      console.log("\n" + "=".repeat(80));
+      console.log("[5/5] Generating comparison report...");
+      console.log("=".repeat(80));
+      
+    } catch (error: any) {
+      console.error("\n❌ Error during processing:", error.message);
+      process.exit(1);
+    }
+    
+    console.log("Comparing copywallet vs targetwallet...");
+    
+    const copywalletDir = path.join(__dirname, "..", "output", "copywallet-comparison", "copywallet");
+    const targetwalletDir = path.join(__dirname, "..", "output", "copywallet-comparison", "targetwallet");
+    const outputDir = path.join(__dirname, "..", "output", "copywallet-comparison");
+    
+    // Ensure output directory exists
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+    
+    // Find analysis files for copywallet
+    if (!fs.existsSync(copywalletDir)) {
+      console.error(`Error: ${copywalletDir} not found`);
+      console.error(`Please run 'npm start copywallet' and 'npm run analyze copywallet' first.`);
+      process.exit(1);
+    }
+    
+    if (!fs.existsSync(targetwalletDir)) {
+      console.error(`Error: ${targetwalletDir} not found`);
+      console.error(`Please run 'npm start targetwallet' and 'npm run analyze targetwallet' first.`);
+      process.exit(1);
+    }
+    
+    const copywalletFiles = fs.readdirSync(copywalletDir);
+    const targetwalletFiles = fs.readdirSync(targetwalletDir);
+    
+    const copywalletPositionFile = copywalletFiles.find(f => f.startsWith("analysis_by_position_") && f.endsWith(".csv"));
+    const targetwalletPositionFile = targetwalletFiles.find(f => f.startsWith("analysis_by_position_") && f.endsWith(".csv"));
+    
+    if (!copywalletPositionFile || !targetwalletPositionFile) {
+      console.error("Error: Missing analysis files");
+      if (!copywalletPositionFile) console.error("  - Missing copywallet analysis_by_position_*.csv");
+      if (!targetwalletPositionFile) console.error("  - Missing targetwallet analysis_by_position_*.csv");
+      console.error(`Please run 'npm run analyze copywallet' and 'npm run analyze targetwallet' first.`);
+      process.exit(1);
+    }
+    
+    // Extract labels from filenames
+    label1 = "copywallet_" + copywalletPositionFile.replace("analysis_by_position_", "").replace(".csv", "");
+    label2 = "targetwallet_" + targetwalletPositionFile.replace("analysis_by_position_", "").replace(".csv", "");
+    
+    const copywalletLabel = copywalletPositionFile.replace("analysis_by_position_", "").replace(".csv", "");
+    const targetwalletLabel = targetwalletPositionFile.replace("analysis_by_position_", "").replace(".csv", "");
+    
+    file1Position = path.join(copywalletDir, copywalletPositionFile);
+    file2Position = path.join(targetwalletDir, targetwalletPositionFile);
+    file1Daily = path.join(copywalletDir, `analysis_by_day_${copywalletLabel}.csv`);
+    file2Daily = path.join(targetwalletDir, `analysis_by_day_${targetwalletLabel}.csv`);
+    file1TransactionDetails = path.join(copywalletDir, `transaction_details_${copywalletLabel}.csv`);
+    file2TransactionDetails = path.join(targetwalletDir, `transaction_details_${targetwalletLabel}.csv`);
+    outputPath = path.join(outputDir, `comparison_${label1}_vs_${label2}.csv`);
+    
+  } else if (args.length === 2) {
+    // Legacy mode: custom labels provided
+    label1 = args[0];
+    label2 = args[1];
+    
+    const outputDir = path.join(__dirname, "..", "output");
+    
+    // Prepare output file
+    const outputFilename = `comparison_${label1}_${label2}.csv`;
+    outputPath = path.join(outputDir, outputFilename);
+    
+    // Read analysis files
+    file1Position = path.join(outputDir, `analysis_by_position_${label1}.csv`);
+    file2Position = path.join(outputDir, `analysis_by_position_${label2}.csv`);
+    file1Daily = path.join(outputDir, `analysis_by_day_${label1}.csv`);
+    file2Daily = path.join(outputDir, `analysis_by_day_${label2}.csv`);
+    file1TransactionDetails = path.join(outputDir, `transaction_details_${label1}.csv`);
+    file2TransactionDetails = path.join(outputDir, `transaction_details_${label2}.csv`);
+  } else {
+    console.error("Usage:");
+    console.error("  npm run comparison                  # Compare copywallet vs targetwallet (default)");
+    console.error("  npm run comparison <label1> <label2> # Compare custom labels");
     console.error("Example: npm run comparison 0xa8a5_11-10 0x71d8_11-10");
     process.exit(1);
   }
   
-  const label1 = args[0];
-  const label2 = args[1];
-  
-  const outputDir = path.join(__dirname, "..", "output");
-  
-  // Prepare output file
-  const outputFilename = `comparison_${label1}_${label2}.csv`;
-  const outputPath = path.join(outputDir, outputFilename);
-  
   // CSV data array
   const csvData: any[] = [];
-  
-  // Read analysis files
-  const file1Position = path.join(outputDir, `analysis_by_position_${label1}.csv`);
-  const file2Position = path.join(outputDir, `analysis_by_position_${label2}.csv`);
-  const file1Daily = path.join(outputDir, `analysis_by_day_${label1}.csv`);
-  const file2Daily = path.join(outputDir, `analysis_by_day_${label2}.csv`);
-  const file1TransactionDetails = path.join(outputDir, `transaction_details_${label1}.csv`);
-  const file2TransactionDetails = path.join(outputDir, `transaction_details_${label2}.csv`);
   
   if (!fs.existsSync(file1Position) || !fs.existsSync(file2Position)) {
     console.error("Error: Analysis files not found");
@@ -334,7 +448,7 @@ async function main() {
     vs_expected: calculateVsExpected(eventsRatio, 1.0) // Should be ~1.0x (efficiency)
   });
   csvData.push({
-    metric: "Operating Time",
+    metric: "Operating Time (last tx - first tx)",
     [label1]: formatDuration(operatingDays),
     [label2]: formatDuration(operatingDays),
     ratio: "Same",
@@ -651,6 +765,18 @@ async function main() {
   
   console.log(`\nComparison saved to: ${outputPath}`);
   console.log(`Total metrics compared: ${csvData.length}`);
+  
+  // If running in end-to-end mode, show completion message
+  if (args.length === 0) {
+    console.log("\n" + "=".repeat(80));
+    console.log("✅ COMPARISON COMPLETE!");
+    console.log("=".repeat(80));
+    console.log("\nCheck output/copywallet-comparison/ for results:");
+    console.log("  - copywallet/ - Your copy bot analysis");
+    console.log("  - targetwallet/ - Target wallet analysis");
+    console.log("  - comparison_*.csv - Side-by-side comparison");
+    console.log();
+  }
 }
 
 main().catch(error => {

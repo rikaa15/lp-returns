@@ -300,9 +300,60 @@ async function main() {
   console.log("LP Returns Analysis - Aerodrome USDC-cbBTC Pool");
   console.log("=".repeat(60));
   
-  // Read input files
-  const actionsPath = path.join(__dirname, "..", "input", "actions.csv");
-  const earningsPath = path.join(__dirname, "..", "input", "earnings_per_action.csv");
+  // Read input files from command line or default locations
+  const args = process.argv.slice(2);
+  let actionsPath: string;
+  let earningsPath: string;
+  let outputPath: string;
+  let walletType: "copywallet" | "targetwallet" = "copywallet";
+  
+  if (args.length >= 3) {
+    // Batch mode or explicit paths provided
+    actionsPath = args[0];
+    earningsPath = args[1];
+    outputPath = args[2];
+  } else {
+    // Default mode: use copywallet-comparison structure
+    // Check if user specified targetwallet or copywallet (default: copywallet)
+    if (args.length === 1 && (args[0] === "targetwallet" || args[0] === "copywallet")) {
+      walletType = args[0];
+    }
+    
+    const inputBaseDir = path.join(__dirname, "..", "input", "copywallet-comparison", walletType);
+    const outputBaseDir = path.join(__dirname, "..", "output", "copywallet-comparison", walletType);
+    
+    // Ensure output directory exists
+    if (!fs.existsSync(outputBaseDir)) {
+      fs.mkdirSync(outputBaseDir, { recursive: true });
+    }
+    
+    // Find the actions and earnings files (they have block range in filename)
+    if (!fs.existsSync(inputBaseDir)) {
+      console.error(`Error: Input directory not found: ${inputBaseDir}`);
+      console.error(`Please create the directory structure: input/copywallet-comparison/${walletType}/`);
+      process.exit(1);
+    }
+    
+    const files = fs.readdirSync(inputBaseDir);
+    const actionsFile = files.find(f => f.startsWith("actions_") && f.endsWith(".csv"));
+    const earningsFile = files.find(f => f.startsWith("earnings_per_action_") && f.endsWith(".csv"));
+    
+    if (!actionsFile || !earningsFile) {
+      console.error(`Error: Missing files in ${inputBaseDir}`);
+      if (!actionsFile) console.error("  - Missing: actions_*.csv");
+      if (!earningsFile) console.error("  - Missing: earnings_per_action_*.csv");
+      process.exit(1);
+    }
+    
+    actionsPath = path.join(inputBaseDir, actionsFile);
+    earningsPath = path.join(inputBaseDir, earningsFile);
+    
+    // Extract label from filename (e.g., "actions_blocks_38010776_38014926.csv" -> "blocks_38010776_38014926")
+    const label = actionsFile.replace("actions_", "").replace(".csv", "");
+    outputPath = path.join(outputBaseDir, `transaction_details_${label}.csv`);
+    
+    console.log(`Processing ${walletType}...`);
+  }
   
   if (!fs.existsSync(actionsPath)) {
     console.error(`Error: ${actionsPath} not found`);
@@ -403,7 +454,7 @@ async function main() {
   }
   
   // Fetch all swaps once (with some buffer for finding nearby swaps)
-  const BUFFER = 50000; // Buffer to ensure we find swaps before/after edge actions
+  const BUFFER = 5000; // Buffer to ensure we find swaps before/after edge actions
   const swapsCache = await fetchAllSwapsInRange(
     Math.max(0, minBlock - BUFFER),
     maxBlock + BUFFER
@@ -512,12 +563,6 @@ async function main() {
   
   console.log();
   
-  // Create output directory
-  const outputDir = path.join(__dirname, "..", "output");
-  if (!fs.existsSync(outputDir)) {
-    fs.mkdirSync(outputDir, { recursive: true });
-  }
-  
   // Write output CSV
   if (outputRows.length > 0) {
     const outputCsv = stringify(outputRows, {
@@ -548,7 +593,12 @@ async function main() {
       ],
     });
     
-    const outputPath = path.join(outputDir, "transaction_details.csv");
+    // Ensure output directory exists
+    const outputDir2 = path.dirname(outputPath);
+    if (!fs.existsSync(outputDir2)) {
+      fs.mkdirSync(outputDir2, { recursive: true });
+    }
+    
     fs.writeFileSync(outputPath, outputCsv, "utf-8");
     
     console.log("=".repeat(60));
@@ -571,7 +621,7 @@ async function main() {
       { header: true }
     );
     
-    const failedPath = path.join(outputDir, "failed_actions.csv");
+    const failedPath = path.join(path.dirname(outputPath), "failed_actions.csv");
     fs.writeFileSync(failedPath, failedCsv, "utf-8");
     console.log(`  Failed actions logged to: ${failedPath}`);
   }
