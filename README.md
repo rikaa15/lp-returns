@@ -45,7 +45,7 @@ Analyze liquidity pool returns for Aerodrome's USDC-cbBTC pool (0x4e962BB3889Bf0
    ```
    
   **Note:** 
-  - This script is meant to work with inputs from our timeline script outputs (see [section](#lp-returns))
+  - This script is meant to work with inputs from our timeline script outputs (see [Input Files](#input-files) section below)
   - Each wallet's CSVs must be in a folder named with their address.
    
   Output is organized by block range:
