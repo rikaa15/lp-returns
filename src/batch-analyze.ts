@@ -143,6 +143,21 @@ async function main() {
   console.log("=".repeat(80));
   console.log();
   
+  // Extract block range from first config (all should have the same range)
+  let blockRange = "unknown";
+  if (configs.length > 0 && configs[0].label) {
+    const match = configs[0].label.match(/blocks_(\d+)_(\d+)/);
+    if (match) {
+      blockRange = `${match[1]}_${match[2]}`;
+    }
+  }
+  
+  // Create subdirectory for this block range
+  const sessionOutputDir = path.join(outputDir, blockRange);
+  if (!fs.existsSync(sessionOutputDir)) {
+    fs.mkdirSync(sessionOutputDir, { recursive: true });
+  }
+  
   // Process each address
   for (let i = 0; i < configs.length; i++) {
     const config = configs[i];
@@ -150,7 +165,7 @@ async function main() {
     console.log("-".repeat(80));
     
     // Create output directory for this address
-    const addressOutputDir = path.join(outputDir, config.address);
+    const addressOutputDir = path.join(sessionOutputDir, config.address);
     if (!fs.existsSync(addressOutputDir)) {
       fs.mkdirSync(addressOutputDir, { recursive: true });
     }
@@ -187,7 +202,7 @@ async function main() {
   console.log(`\nProcessed ${configs.length} address(es)`);
   console.log(`\nOutput directories:`);
   for (const config of configs) {
-    console.log(`  - output/${config.address}/`);
+    console.log(`  - output/topwallet-comparison/${blockRange}/${config.address}/`);
   }
   
   // Generate batch comparison CSV
@@ -196,8 +211,8 @@ async function main() {
   console.log("=".repeat(80));
   
   try {
-    const result = await generateBatchComparison(configs, outputDir);
-    const comparisonPath = path.join(outputDir, `batch_comparison_${result.label}.csv`);
+    const result = await generateBatchComparison(configs, sessionOutputDir);
+    const comparisonPath = path.join(sessionOutputDir, `batch_comparison_${result.label}.csv`);
     fs.writeFileSync(comparisonPath, result.csvData, "utf-8");
     console.log(`\nBatch comparison saved to: ${comparisonPath}`);
   } catch (error: any) {
@@ -207,7 +222,7 @@ async function main() {
   console.log("\n" + "=".repeat(80));
   console.log("✅ BATCH ANALYSIS COMPLETE!");
   console.log("=".repeat(80));
-  console.log("\nCheck output/topwallet-comparison/ for results:");
+  console.log("\nCheck output/topwallet-comparison/${blockRange}/ for results:");
   console.log("  - {address}/ - Individual wallet analysis");
   console.log("  - batch_comparison_*.csv - Side-by-side comparison of all wallets");
   console.log();

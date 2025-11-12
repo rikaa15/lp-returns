@@ -319,21 +319,37 @@ async function main() {
       walletType = args[0];
     }
     
-    const inputBaseDir = path.join(__dirname, "..", "input", "copywallet-comparison", walletType);
-    const outputBaseDir = path.join(__dirname, "..", "output", "copywallet-comparison", walletType);
+    // Auto-detect addresses from folder names
+    const walletBaseDir = path.join(__dirname, "..", "input", "copywallet-comparison", walletType);
     
-    // Ensure output directory exists
-    if (!fs.existsSync(outputBaseDir)) {
-      fs.mkdirSync(outputBaseDir, { recursive: true });
-    }
-    
-    // Find the actions and earnings files (they have block range in filename)
-    if (!fs.existsSync(inputBaseDir)) {
-      console.error(`Error: Input directory not found: ${inputBaseDir}`);
+    if (!fs.existsSync(walletBaseDir)) {
+      console.error(`Error: Input directory not found: ${walletBaseDir}`);
       console.error(`Please create the directory structure: input/copywallet-comparison/${walletType}/`);
       process.exit(1);
     }
     
+    // Find address folder
+    const addressDirs = fs.readdirSync(walletBaseDir).filter(f => {
+      const fullPath = path.join(walletBaseDir, f);
+      return fs.statSync(fullPath).isDirectory() && f.startsWith("0x");
+    });
+    
+    if (addressDirs.length === 0) {
+      console.error(`Error: No address folder found in input/copywallet-comparison/${walletType}/`);
+      console.error(`Please create a folder with the ${walletType} address (e.g., 0xa8a5...) containing the CSV files.`);
+      process.exit(1);
+    }
+    
+    if (addressDirs.length > 1) {
+      console.error(`Error: Multiple address folders found in input/copywallet-comparison/${walletType}/`);
+      console.error("Please keep only one address folder.");
+      process.exit(1);
+    }
+    
+    const walletAddress = addressDirs[0];
+    const inputBaseDir = path.join(walletBaseDir, walletAddress);
+    
+    // Find the actions and earnings files (they have block range in filename)
     const files = fs.readdirSync(inputBaseDir);
     const actionsFile = files.find(f => f.startsWith("actions_") && f.endsWith(".csv"));
     const earningsFile = files.find(f => f.startsWith("earnings_per_action_") && f.endsWith(".csv"));
@@ -350,6 +366,43 @@ async function main() {
     
     // Extract label from filename (e.g., "actions_blocks_38010776_38014926.csv" -> "blocks_38010776_38014926")
     const label = actionsFile.replace("actions_", "").replace(".csv", "");
+    
+    // Extract block range for subdirectory
+    const targetwalletBaseDir = path.join(__dirname, "..", "input", "copywallet-comparison", "targetwallet");
+    const targetwalletAddressDirs = fs.readdirSync(targetwalletBaseDir).filter(f => {
+      const fullPath = path.join(targetwalletBaseDir, f);
+      return fs.statSync(fullPath).isDirectory() && f.startsWith("0x");
+    });
+    
+    if (targetwalletAddressDirs.length === 0) {
+      console.error("Error: No address folder found in input/copywallet-comparison/targetwallet/");
+      console.error("Please create a folder with the targetwallet address containing the CSV files.");
+      process.exit(1);
+    }
+    
+    const targetwalletAddr = targetwalletAddressDirs[0];
+    const targetwalletInputDir = path.join(targetwalletBaseDir, targetwalletAddr);
+    const targetwalletFiles = fs.readdirSync(targetwalletInputDir);
+    const targetActionsFile = targetwalletFiles.find(f => f.startsWith("actions_") && f.endsWith(".csv"));
+    
+    let blockRange = "unknown";
+    if (targetActionsFile) {
+      const match = targetActionsFile.match(/blocks_(\d+)_(\d+)/);
+      if (match) {
+        blockRange = `${match[1]}_${match[2]}`;
+      }
+    }
+    
+    // Create subdirectory: {targetAddress}_{blockRange}/
+    const sessionDir = `${targetwalletAddr}_${blockRange}`;
+    const baseOutputDir = path.join(__dirname, "..", "output", "copywallet-comparison", sessionDir);
+    const outputBaseDir = path.join(baseOutputDir, walletType);
+    
+    // Ensure output directory exists
+    if (!fs.existsSync(outputBaseDir)) {
+      fs.mkdirSync(outputBaseDir, { recursive: true });
+    }
+    
     outputPath = path.join(outputBaseDir, `transaction_details_${label}.csv`);
     
     console.log(`Processing ${walletType}...`);

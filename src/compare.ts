@@ -5,6 +5,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import "dotenv/config";
 import { execSync } from "child_process";
 import { parse } from "csv-parse/sync";
 import { stringify } from "csv-stringify/sync";
@@ -86,6 +87,8 @@ async function main() {
   let file1TransactionDetails: string;
   let file2TransactionDetails: string;
   let outputPath: string;
+  let targetwalletAddr: string = "";
+  let blockRange: string = "";
   
   if (args.length === 0) {
     // Default mode: End-to-end processing and comparison of copywallet vs targetwallet
@@ -93,6 +96,45 @@ async function main() {
     console.log("COPYWALLET VS TARGETWALLET COMPARISON");
     console.log("=".repeat(80));
     console.log("\nThis will process both wallets and generate a comparison report.\n");
+    
+    // Auto-detect addresses from folder names
+    const copywalletInputDir = path.join(__dirname, "..", "input", "copywallet-comparison", "copywallet");
+    const targetwalletInputDir = path.join(__dirname, "..", "input", "copywallet-comparison", "targetwallet");
+    
+    // Find address folders
+    const copywalletDirs = fs.readdirSync(copywalletInputDir).filter(f => {
+      const fullPath = path.join(copywalletInputDir, f);
+      return fs.statSync(fullPath).isDirectory() && f.startsWith("0x");
+    });
+    
+    const targetwalletDirs = fs.readdirSync(targetwalletInputDir).filter(f => {
+      const fullPath = path.join(targetwalletInputDir, f);
+      return fs.statSync(fullPath).isDirectory() && f.startsWith("0x");
+    });
+    
+    if (copywalletDirs.length === 0) {
+      console.error("Error: No address folder found in input/copywallet-comparison/copywallet/");
+      console.error("Please create a folder with the copywallet address (e.g., 0xa8a5...) containing the CSV files.");
+      process.exit(1);
+    }
+    
+    if (targetwalletDirs.length === 0) {
+      console.error("Error: No address folder found in input/copywallet-comparison/targetwallet/");
+      console.error("Please create a folder with the targetwallet address (e.g., 0x71d8...) containing the CSV files.");
+      process.exit(1);
+    }
+    
+    if (copywalletDirs.length > 1) {
+      console.error("Error: Multiple address folders found in input/copywallet-comparison/copywallet/");
+      console.error("Please keep only one address folder.");
+      process.exit(1);
+    }
+    
+    if (targetwalletDirs.length > 1) {
+      console.error("Error: Multiple address folders found in input/copywallet-comparison/targetwallet/");
+      console.error("Please keep only one address folder.");
+      process.exit(1);
+    }
     
     try {
       // Step 1: Process copywallet
@@ -131,14 +173,37 @@ async function main() {
     
     console.log("Comparing copywallet vs targetwallet...");
     
-    const copywalletDir = path.join(__dirname, "..", "output", "copywallet-comparison", "copywallet");
-    const targetwalletDir = path.join(__dirname, "..", "output", "copywallet-comparison", "targetwallet");
-    const outputDir = path.join(__dirname, "..", "output", "copywallet-comparison");
+    // Read addresses from folder names (already detected above)
+    const copywalletAddr = copywalletDirs[0];
+    targetwalletAddr = targetwalletDirs[0];
+    
+    // Extract block range for subdirectory
+    const inputDir = path.join(__dirname, "..", "input", "copywallet-comparison", "targetwallet", targetwalletAddr);
+    const inputFiles = fs.readdirSync(inputDir);
+    const actionsFile = inputFiles.find(f => f.startsWith("actions_") && f.endsWith(".csv"));
+    
+    blockRange = "unknown";
+    
+    // Extract block range from filename (e.g., "actions_blocks_38010776_38014926.csv")
+    if (actionsFile) {
+      const match = actionsFile.match(/blocks_(\d+)_(\d+)/);
+      if (match) {
+        blockRange = `${match[1]}_${match[2]}`;
+      }
+    }
+    
+    // Create subdirectory: {targetAddress}_{blockRange}/
+    const sessionDir = `${targetwalletAddr}_${blockRange}`;
+    const baseOutputDir = path.join(__dirname, "..", "output", "copywallet-comparison");
+    const outputDir = path.join(baseOutputDir, sessionDir);
     
     // Ensure output directory exists
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
     }
+    
+    const copywalletDir = path.join(outputDir, "copywallet");
+    const targetwalletDir = path.join(outputDir, "targetwallet");
     
     // Find analysis files for copywallet
     if (!fs.existsSync(copywalletDir)) {
@@ -167,10 +232,7 @@ async function main() {
       process.exit(1);
     }
     
-    // Extract labels from filenames
-    label1 = "copywallet_" + copywalletPositionFile.replace("analysis_by_position_", "").replace(".csv", "");
-    label2 = "targetwallet_" + targetwalletPositionFile.replace("analysis_by_position_", "").replace(".csv", "");
-    
+    // Extract file labels from filenames for locating files
     const copywalletLabel = copywalletPositionFile.replace("analysis_by_position_", "").replace(".csv", "");
     const targetwalletLabel = targetwalletPositionFile.replace("analysis_by_position_", "").replace(".csv", "");
     
@@ -180,7 +242,20 @@ async function main() {
     file2Daily = path.join(targetwalletDir, `analysis_by_day_${targetwalletLabel}.csv`);
     file1TransactionDetails = path.join(copywalletDir, `transaction_details_${copywalletLabel}.csv`);
     file2TransactionDetails = path.join(targetwalletDir, `transaction_details_${targetwalletLabel}.csv`);
-    outputPath = path.join(outputDir, `comparison_${label1}_vs_${label2}.csv`);
+    
+    // Truncate addresses to 0x + 4 chars for display (e.g., 0xa8a5)
+    const truncateAddress = (addr: string): string => {
+      if (addr.startsWith("0x") && addr.length > 6) {
+        return addr.substring(0, 6); // "0x" + 4 chars
+      }
+      return addr;
+    };
+    
+    // Set column labels using truncated addresses
+    label1 = `${truncateAddress(copywalletAddr)} (copy wallet)`;
+    label2 = `${truncateAddress(targetwalletAddr)} (target wallet)`;
+    
+    outputPath = path.join(outputDir, `copywallet_comparison_${targetwalletAddr}_${blockRange}.csv`);
     
   } else if (args.length === 2) {
     // Legacy mode: custom labels provided
@@ -309,6 +384,56 @@ async function main() {
   const excluded1Data = calculateExcludedPositions(file1TransactionDetails);
   const excluded2Data = calculateExcludedPositions(file2TransactionDetails);
   
+  // Extract metadata from transaction details (block range and timestamps)
+  const extractMetadata = (transactionFile: string): { 
+    blockRange: string, 
+    startTime: string, 
+    endTime: string 
+  } => {
+    if (!fs.existsSync(transactionFile)) {
+      return { blockRange: "unknown", startTime: "unknown", endTime: "unknown" };
+    }
+    
+    const txData: any[] = parse(fs.readFileSync(transactionFile, "utf-8"), {
+      columns: true,
+      skip_empty_lines: true
+    });
+    
+    if (txData.length === 0) {
+      return { blockRange: "unknown", startTime: "unknown", endTime: "unknown" };
+    }
+    
+    // Get first and last transaction timestamps and blocks
+    const sortedByTime = [...txData].sort((a, b) => 
+      new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+    
+    const firstTx = sortedByTime[0];
+    const lastTx = sortedByTime[sortedByTime.length - 1];
+    
+    // Extract blocks
+    const blocks = txData.map(row => parseInt(row.block)).filter(b => !isNaN(b));
+    
+    if (blocks.length === 0) {
+      return {
+        blockRange: "unknown",
+        startTime: firstTx.timestamp || "unknown",
+        endTime: lastTx.timestamp || "unknown"
+      };
+    }
+    
+    const minBlock = Math.min(...blocks);
+    const maxBlock = Math.max(...blocks);
+    
+    return {
+      blockRange: `${minBlock} to ${maxBlock}`,
+      startTime: firstTx.timestamp,
+      endTime: lastTx.timestamp
+    };
+  };
+  
+  const metadata = extractMetadata(file1TransactionDetails); // Use copywallet metadata
+  
   // Calculate metrics
   const positions1 = parseInt(wallet1.positions_count);
   const positions2 = parseInt(wallet2.positions_count);
@@ -394,7 +519,44 @@ async function main() {
   };
   
   // Build CSV data
-  // Positions & Activity
+  // Add metadata section
+  csvData.push({
+    metric: "ANALYSIS METADATA",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  csvData.push({
+    metric: "Block Range",
+    [label1]: metadata.blockRange,
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  csvData.push({
+    metric: "Start Time",
+    [label1]: metadata.startTime,
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  csvData.push({
+    metric: "End Time",
+    [label1]: metadata.endTime,
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  csvData.push({
+    metric: "",
+    [label1]: "",
+    [label2]: "",
+    ratio: "",
+    vs_expected: ""
+  });
+  
+  // Baseline & Positions
   csvData.push({
     metric: "BASELINE",
     [label1]: "",
@@ -738,17 +900,6 @@ async function main() {
     vs_expected: "-"
   });
   
-  // Performance gap
-  const perfGap = Math.abs(apr1 - apr2);
-  const winner = apr1 > apr2 ? label1 : label2;
-  csvData.push({
-    metric: "Performance Gap (pp)",
-    [label1]: perfGap.toFixed(2),
-    [label2]: `Winner: ${winner}`,
-    ratio: "-",
-    vs_expected: "-"
-  });
-  
   // Write to CSV file
   const csvOutput = stringify(csvData, {
     header: true,
@@ -771,10 +922,10 @@ async function main() {
     console.log("\n" + "=".repeat(80));
     console.log("✅ COMPARISON COMPLETE!");
     console.log("=".repeat(80));
-    console.log("\nCheck output/copywallet-comparison/ for results:");
+    console.log(`\nCheck output/copywallet-comparison/${targetwalletAddr}_${blockRange}/ for results:`);
     console.log("  - copywallet/ - Your copy bot analysis");
     console.log("  - targetwallet/ - Target wallet analysis");
-    console.log("  - comparison_*.csv - Side-by-side comparison");
+    console.log(`  - copywallet_comparison_${targetwalletAddr}_${blockRange}.csv - Side-by-side comparison`);
     console.log();
   }
 }

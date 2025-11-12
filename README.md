@@ -10,7 +10,12 @@ Analyze liquidity pool returns for Aerodrome's USDC-cbBTC pool (0x4e962BB3889Bf0
    ```
 
 2. **Configure environment:**
-   Create a `.env` file in the project root:
+   Copy `env.example` to `.env` and fill in your values:
+   ```bash
+   cp env.example .env
+   ```
+   
+   Required:
    ```
    BASE_RPC_URL=your_base_rpc_url
    BASESCAN_API_KEY=your_basescan_api_key
@@ -24,11 +29,13 @@ Analyze liquidity pool returns for Aerodrome's USDC-cbBTC pool (0x4e962BB3889Bf0
    input/
    ├── copywallet-comparison/          # For comparing copy bot vs target wallet
    │   ├── copywallet/
-   │   │   ├── actions_blocks_*.csv
-   │   │   └── earnings_per_action_blocks_*.csv
+   │   │   └── {copywalletAddress}/
+   │   │       ├── actions_blocks_*.csv
+   │   │       └── earnings_per_action_blocks_*.csv
    │   └── targetwallet/
-   │       ├── actions_blocks_*.csv
-   │       └── earnings_per_action_blocks_*.csv
+   │       └── {targetwalletAddress}/
+   │           ├── actions_blocks_*.csv
+   │           └── earnings_per_action_blocks_*.csv
    └── topwallet-comparison/           # For batch analysis of multiple wallets
        ├── 0xAddress1/
        │   ├── actions_blocks_*.csv
@@ -37,21 +44,33 @@ Analyze liquidity pool returns for Aerodrome's USDC-cbBTC pool (0x4e962BB3889Bf0
        └── 0xAddress3/
    ```
    
-   **Note:** The directory structure is preserved in git, but CSV files are ignored.
+  **Note:** 
+  - Each wallet's CSVs must be in a folder named with their address.
    
-   Output mirrors the input structure:
-   ```
-   output/
-   ├── copywallet-comparison/
-   │   ├── copywallet/
-   │   ├── targetwallet/
-   │   └── comparison_*.csv
-   └── topwallet-comparison/
-       ├── 0xAddress1/
-       ├── 0xAddress2/
-       ├── 0xAddress3/
-       └── batch_comparison_blocks_*.csv
-   ```
+  Output is organized by block range:
+  ```
+  output/
+  ├── copywallet-comparison/
+  │   └── {targetAddress}_{startBlock}_{endBlock}/
+  │       ├── copywallet/
+  │       │   ├── transaction_details_blocks_*.csv
+  │       │   ├── analysis_by_position_blocks_*.csv
+  │       │   └── analysis_by_day_blocks_*.csv
+  │       ├── targetwallet/
+  │       │   ├── transaction_details_blocks_*.csv
+  │       │   ├── analysis_by_position_blocks_*.csv
+  │       │   └── analysis_by_day_blocks_*.csv
+  │       └── copywallet_comparison_*.csv
+  └── topwallet-comparison/
+      └── {startBlock}_{endBlock}/
+          ├── 0xAddress1/
+          │   ├── transaction_details_blocks_*.csv
+          │   ├── analysis_by_position_blocks_*.csv
+          │   └── analysis_by_day_blocks_*.csv
+          ├── 0xAddress2/
+          ├── 0xAddress3/
+          └── batch_comparison_blocks_*.csv
+  ```
 
 ## Usage
 
@@ -91,14 +110,14 @@ input/topwallet-comparison/
 
 This will:
 - Process all addresses in `input/topwallet-comparison/` automatically
-- Generate individual analysis files for each address in `output/topwallet-comparison/{address}/`
-- Create a **comparison CSV** at `output/topwallet-comparison/batch_comparison_blocks_*.csv` showing all wallets side-by-side
+- Generate individual analysis files for each address in `output/topwallet-comparison/{blockRange}/{address}/`
+- Create a **comparison CSV** at `output/topwallet-comparison/{blockRange}/batch_comparison_blocks_*.csv` showing all wallets side-by-side
 
 **Output:**
-- `output/topwallet-comparison/batch_comparison_blocks_*.csv` - **Side-by-side comparison with key metrics** (APR, profit, capital deployed, etc.)
-- `output/topwallet-comparison/{address}/transaction_details_*.csv` - Transaction details for each address
-- `output/topwallet-comparison/{address}/analysis_by_position_*.csv` - Position breakdown for each address
-- `output/topwallet-comparison/{address}/analysis_by_day_*.csv` - Daily stats for each address
+- `output/topwallet-comparison/{blockRange}/batch_comparison_blocks_*.csv` - **Side-by-side comparison with key metrics** (APR, profit, capital deployed, etc.)
+- `output/topwallet-comparison/{blockRange}/{address}/transaction_details_*.csv` - Transaction details for each address
+- `output/topwallet-comparison/{blockRange}/{address}/analysis_by_position_*.csv` - Position breakdown for each address
+- `output/topwallet-comparison/{blockRange}/{address}/analysis_by_day_*.csv` - Daily stats for each address
 
 **Use Case:** Quickly identify the best performing wallets to copy by comparing APR, profit margins, and efficiency metrics.
 
@@ -145,9 +164,9 @@ input/copywallet-comparison/
 ```
 
 **Output:**
-- `output/copywallet-comparison/copywallet/` - Your copy bot analysis
-- `output/copywallet-comparison/targetwallet/` - Target wallet analysis
-- `output/copywallet-comparison/comparison_*.csv` - Side-by-side comparison with ratio analysis
+- `output/copywallet-comparison/{targetAddress}_{blockRange}/copywallet/` - Your copy bot analysis
+- `output/copywallet-comparison/{targetAddress}_{blockRange}/targetwallet/` - Target wallet analysis
+- `output/copywallet-comparison/{targetAddress}_{blockRange}/copywallet_comparison_*.csv` - Side-by-side comparison with ratio analysis
 
 **Special Features:**
 - **Ratio Column**: Shows the ratio between the two wallets for each metric

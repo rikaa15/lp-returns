@@ -431,7 +431,44 @@ async function main() {
       walletType = args[0];
     }
     
-    const outputBaseDir = path.join(__dirname, "..", "output", "copywallet-comparison", walletType);
+    // Auto-detect addresses from folder names
+    const targetwalletBaseDir = path.join(__dirname, "..", "input", "copywallet-comparison", "targetwallet");
+    
+    if (!fs.existsSync(targetwalletBaseDir)) {
+      console.error("Error: Input directory not found: input/copywallet-comparison/targetwallet/");
+      console.error("Please create the directory structure.");
+      process.exit(1);
+    }
+    
+    // Find address folder
+    const targetwalletAddressDirs = fs.readdirSync(targetwalletBaseDir).filter(f => {
+      const fullPath = path.join(targetwalletBaseDir, f);
+      return fs.statSync(fullPath).isDirectory() && f.startsWith("0x");
+    });
+    
+    if (targetwalletAddressDirs.length === 0) {
+      console.error("Error: No address folder found in input/copywallet-comparison/targetwallet/");
+      console.error("Please create a folder with the targetwallet address containing the CSV files.");
+      process.exit(1);
+    }
+    
+    const targetwalletAddr = targetwalletAddressDirs[0];
+    const targetwalletInputDir = path.join(targetwalletBaseDir, targetwalletAddr);
+    const targetwalletFiles = fs.readdirSync(targetwalletInputDir);
+    const targetActionsFile = targetwalletFiles.find(f => f.startsWith("actions_") && f.endsWith(".csv"));
+    
+    let blockRange = "unknown";
+    if (targetActionsFile) {
+      const match = targetActionsFile.match(/blocks_(\d+)_(\d+)/);
+      if (match) {
+        blockRange = `${match[1]}_${match[2]}`;
+      }
+    }
+    
+    // Create subdirectory: {targetAddress}_{blockRange}/
+    const sessionDir = `${targetwalletAddr}_${blockRange}`;
+    const baseOutputDir = path.join(__dirname, "..", "output", "copywallet-comparison", sessionDir);
+    const outputBaseDir = path.join(baseOutputDir, walletType);
     
     // Ensure output directory exists
     if (!fs.existsSync(outputBaseDir)) {
