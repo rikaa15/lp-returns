@@ -214,12 +214,11 @@ function calculatePositionStats(rows: AnalysisRow[]): PositionStats {
     active_time_seconds = (burnTime.getTime() - mintTime.getTime()) / 1000;
   }
   
-  // Calculate profit and impermanent loss using the same formulas from deprecated/index.ts
+  // Calculate profit and impermanent loss
   let profit_usd = 0;
   let impermanent_loss_usd = 0;
   
   if (first_mint && first_burn) {
-    // Use already-calculated USD values (which have correct prices for each transaction)
     const hodlValueAtDepositUSD = total_deposit_usd; // Deposit valued at time of deposit
     const lpValueAtExitUSD = total_withdraw_usd;      // Withdraw valued at time of withdrawal
     
@@ -248,7 +247,7 @@ function calculatePositionStats(rows: AnalysisRow[]): PositionStats {
       
     }
     
-    // Profit = (LP value at exit - HODL value at deposit) + rewards (matching deprecated code)
+    // Profit = (LP value at exit - HODL value at deposit) + rewards
     // This includes: IL + HODL_gain + fees + rewards
     const collectedRewardsAmountUSD = total_aero_rewards_usd;
     profit_usd = (lpValueAtExitUSD - hodlValueAtDepositUSD) + collectedRewardsAmountUSD;
