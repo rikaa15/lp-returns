@@ -888,8 +888,10 @@ async function main() {
   });
   
   // Calculate APR
-  const apr1 = (profit1 / avgCapital1) * (365 / operatingDays1) * 100;
-  const apr2 = (profit2 / avgCapital2) * (365 / operatingDays2) * 100;
+  const avgDepositPerPosition1 = positions1 > 0 ? depositValue1 / positions1 : 0;
+  const avgDepositPerPosition2 = positions2 > 0 ? depositValue2 / positions2 : 0;
+  const apr1 = avgDepositPerPosition1 > 0 ? (profit1 / avgDepositPerPosition1) * (365 / operatingDays1) * 100 : 0;
+  const apr2 = avgDepositPerPosition2 > 0 ? (profit2 / avgDepositPerPosition2) * (365 / operatingDays2) * 100 : 0;
   
   // Annualized Returns
   csvData.push({
