@@ -224,7 +224,6 @@ function calculatePositionStats(rows: AnalysisRow[]): PositionStats {
     const lpValueAtExitUSD = total_withdraw_usd;      // Withdraw valued at time of withdrawal
     
     // Calculate HODL value at exit (for IL calculation)
-    // We need to value the deposited tokens at the withdrawal prices
     // For multiple burns at different prices, use weighted average
     let totalWithdrawValue = 0;
     let totalCbbtcWithdrawn = 0;
@@ -244,7 +243,6 @@ function calculatePositionStats(rows: AnalysisRow[]): PositionStats {
     
     
     // Impermanent loss = LP value (without fees) - HODL value (both at exit time)
-    // Now works for positions with any number of mints/burns
     if (burns.length > 0) {
       impermanent_loss_usd = lpValueAtExitUSD - hodlValueAtExitUSD;
       
@@ -252,7 +250,6 @@ function calculatePositionStats(rows: AnalysisRow[]): PositionStats {
     
     // Profit = (LP value at exit - HODL value at deposit) + rewards (matching deprecated code)
     // This includes: IL + HODL_gain + fees + rewards
-    // Now using real AERO prices from CoinGecko
     const collectedRewardsAmountUSD = total_aero_rewards_usd;
     profit_usd = (lpValueAtExitUSD - hodlValueAtDepositUSD) + collectedRewardsAmountUSD;
   }
@@ -359,8 +356,6 @@ function calculateDailyStats(rows: AnalysisRow[]): DailyStats[] {
     
     const aero_rewards_collected = dayRows.reduce((sum, r) => sum + r.AERO_usd, 0);
     
-    // Daily income = fees + rewards collected that day
-    // Note: This doesn't account for IL or price changes (see profit_usd in analysis_by_position.csv for true profit)
     const daily_income_usd = fees_collected_usd + aero_rewards_collected;
     
     dailyStats.push({
@@ -377,7 +372,7 @@ function calculateDailyStats(rows: AnalysisRow[]): DailyStats[] {
       fees_collected_usd,
       aero_rewards_collected,
       daily_income_usd,
-      capital_deployed_usd: 0, // Will be calculated after sorting
+      capital_deployed_usd: 0,
     });
   }
   
@@ -581,10 +576,10 @@ async function main() {
   
   console.log(`\nPosition Breakdown: ${completePositionsCount} complete, ${excludedCount} excluded`);
   if (preExistingCount > 0) {
-    console.log(`  ⚠️  ${preExistingCount} pre-existing position(s) (opened before observation) excluded`);
+    console.log(`    ${preExistingCount} pre-existing position(s) (opened before observation) excluded`);
   }
   if (unclosedPositionsCount > 0) {
-    console.log(`  ⚠️  ${unclosedPositionsCount} unclosed position(s) (still open) excluded`);
+    console.log(`    ${unclosedPositionsCount} unclosed position(s) (still open) excluded`);
   }
   
   // Calculate daily stats
@@ -604,11 +599,9 @@ async function main() {
   console.log(`Calculated stats for ${dailyStats.length} days (using ${rowsFromCompletePositions.length} events from complete positions only)\n`);
   
   // Calculate wallet-level aggregated stats
-  // For AERO USD, sum from all events from COMPLETE positions only (position-specific + gauge_getReward)
   const allAeroRewardsUsd = rowsFromCompletePositions.reduce((sum, r) => sum + r.AERO_usd, 0);
   
   // Calculate average capital deployed from COMPLETE positions only
-  // For APR calculation, we only want to consider capital that has completed its cycle within observation period
   const completePositionsOnly = positionStats.filter(p => p.mint_count > 0 && p.burn_count > 0);
   const totalDepositsCompletePositions = completePositionsOnly.reduce((sum, p) => sum + p.total_deposit_usd, 0);
   const totalWithdrawalsCompletePositions = completePositionsOnly.reduce((sum, p) => sum + p.total_withdraw_usd, 0);
@@ -620,9 +613,8 @@ async function main() {
     : 0;
   
   // Calculate actual operating time from earliest to latest transaction (complete positions only)
-  let days_active = dailyStats.length; // Default to calendar days
+  let days_active = dailyStats.length;
   if (rowsFromCompletePositions.length >= 2) {
-    // Find the absolute earliest and latest timestamps across all events in complete positions
     const timestamps = rowsFromCompletePositions.map(r => new Date(r.timestamp).getTime());
     const earliestTimestamp = Math.min(...timestamps);
     const latestTimestamp = Math.max(...timestamps);
@@ -630,8 +622,8 @@ async function main() {
     days_active = actualMilliseconds / (1000 * 60 * 60 * 24); // Convert to days
     
     // Ensure we have a minimum time period to avoid division by zero or unrealistic APRs
-    if (days_active < 0.001) { // Less than ~1.5 minutes
-      days_active = dailyStats.length; // Fall back to calendar days
+    if (days_active < 0.001) {
+      days_active = dailyStats.length;
     }
   }
   
@@ -639,8 +631,8 @@ async function main() {
   const completePositions = positionStats.filter(p => p.mint_count > 0 && p.burn_count > 0);
   
   const walletStats: WalletStats = {
-    positions_count: completePositions.length, // Only count complete positions
-    events_count: rowsFromCompletePositions.length, // Only count events from complete positions
+    positions_count: completePositions.length,
+    events_count: rowsFromCompletePositions.length,
     total_deposit_usdc: completePositions.reduce((sum, p) => sum + p.total_deposit_usdc, 0),
     total_deposit_cbbtc: completePositions.reduce((sum, p) => sum + p.total_deposit_cbbtc, 0),
     total_withdraw_usdc: completePositions.reduce((sum, p) => sum + p.total_withdraw_usdc, 0),
@@ -653,30 +645,27 @@ async function main() {
     total_collected_aero_rewards_usd: allAeroRewardsUsd,
     total_impermanent_loss_usd: completePositions.reduce((sum, p) => sum + p.impermanent_loss_usd, 0),
     total_profit_usd: completePositions.reduce((sum, p) => sum + p.profit_usd, 0),
-    xirr: null, // Will be calculated below
+    xirr: null,
     avg_capital_deployed_usd,
-    apr: null, // Will be calculated below
+    apr: null,
     days_active,
   };
   
   // Add gauge_getReward rewards to token count (wallet-level, not position-specific)
-  // Only from complete positions
   const gaugeRewards = rowsFromCompletePositions
     .filter(r => r.action === "gauge_getReward")
     .reduce((sum, e) => sum + e.reward, 0);
   walletStats.total_collected_aero_rewards += gaugeRewards;
   
   // Add gauge_getReward AERO rewards (USD) to wallet profit
-  // Only from complete positions
   const gaugeRewardsUsd = rowsFromCompletePositions
     .filter(r => r.action === "gauge_getReward")
     .reduce((sum, e) => sum + e.AERO_usd, 0);
   walletStats.total_profit_usd += gaugeRewardsUsd;
   
-  // Calculate wallet-level XIRR from cash flows of COMPLETE positions only
   const walletCashFlows: CashFlow[] = [];
   
-  // Add all mints as negative cash flows (complete positions only)
+  // Add all mints as negative cash flows
   rowsFromCompletePositions.filter(r => r.action === "mint").forEach(mint => {
     walletCashFlows.push({
       date: new Date(mint.timestamp),
@@ -684,7 +673,7 @@ async function main() {
     });
   });
   
-  // Add all burns as positive cash flows (complete positions only)
+  // Add all burns as positive cash flows
   rowsFromCompletePositions.filter(r => r.action === "burn").forEach(burn => {
     walletCashFlows.push({
       date: new Date(burn.timestamp),
@@ -692,7 +681,7 @@ async function main() {
     });
   });
   
-  // Add all fee collections as positive cash flows (complete positions only)
+  // Add all fee collections as positive cash flows
   rowsFromCompletePositions.filter(r => r.action === "collect").forEach(collect => {
     const feeValue = collect.fee0_dec + (collect.fee1_dec * collect.cbBTC_price);
     if (feeValue > 0) {
@@ -703,7 +692,7 @@ async function main() {
     }
   });
   
-  // Add all AERO rewards as positive cash flows (complete positions only, including gauge_getReward)
+  // Add all AERO rewards as positive cash flows
   rowsFromCompletePositions.filter(r => r.AERO_usd > 0).forEach(row => {
     walletCashFlows.push({
       date: new Date(row.timestamp),
@@ -711,12 +700,17 @@ async function main() {
     });
   });
   
-  // Calculate wallet XIRR (only from closed positions)
+  // Calculate wallet XIRR
   walletStats.xirr = calculateXIRR(walletCashFlows);
   
   // Calculate APR (simple annualized return)
-  if (walletStats.avg_capital_deployed_usd > 0 && walletStats.days_active > 0) {
-    const periodReturn = walletStats.total_profit_usd / walletStats.avg_capital_deployed_usd;
+  // Use average deposit per position to account for capital recycling
+  const avgDepositPerPosition = walletStats.positions_count > 0 
+    ? totalDepositsCompletePositions / walletStats.positions_count
+    : 0;
+  
+  if (avgDepositPerPosition > 0 && walletStats.days_active > 0) {
+    const periodReturn = walletStats.total_profit_usd / avgDepositPerPosition;
     walletStats.apr = (periodReturn * 365 / walletStats.days_active) * 100; // Convert to percentage
   }
   
@@ -733,7 +727,6 @@ async function main() {
   // Generate combined summary CSV with COMPLETE positions only + wallet summary at the end
   // Pre-existing and unclosed positions are filtered out from the analysis files
   const combinedCsvData = [
-    // Position rows (complete positions only - both opened AND closed during observation)
     ...completePositions.map(pos => ({
       row_type: "position",
       token_id: pos.token_id,
@@ -759,7 +752,6 @@ async function main() {
       profit_usd: pos.profit_usd,
       xirr: pos.xirr !== null ? pos.xirr : "",
     })),
-    // Wallet summary row at the end (AERO excluded - see analysis_by_day.csv for wallet-level AERO)
     {
       row_type: "wallet_summary",
       token_id: "WALLET_TOTAL",
@@ -793,7 +785,6 @@ async function main() {
   
   fs.writeFileSync(summaryOutputPath, combinedCsv, "utf-8");
   
-  // Add summary row to daily stats
   const dailySummary = {
     date: "TOTAL",
     events_count: dailyStats.reduce((sum, d) => sum + d.events_count, 0),
@@ -810,7 +801,6 @@ async function main() {
     daily_income_usd: dailyStats.reduce((sum, d) => sum + d.daily_income_usd, 0),
   };
   
-  // Export daily stats CSV with summary row at the end
   const dailyCsvData = [...dailyStats, dailySummary];
   const dailyCsv = stringify(dailyCsvData, {
     header: true,
@@ -818,7 +808,6 @@ async function main() {
   
   fs.writeFileSync(dailyOutputPath, dailyCsv, "utf-8");
   
-  // Format operating time for display
   const formatOperatingTime = (days: number): string => {
     const totalHours = days * 24;
     const hours = Math.floor(totalHours);

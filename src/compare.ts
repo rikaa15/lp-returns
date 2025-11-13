@@ -70,8 +70,8 @@ function calculateRatio(val1: number, val2: number): string {
   if (ratio >= 10) return `${formatNumber(ratio, 0)}x`;
   if (ratio >= 1) return `${formatNumber(ratio, 2)}x`;
   if (ratio >= 0.01) return `${formatNumber(ratio, 2)}x`;
-  // For very small ratios, show with 4 decimal places
-  if (ratio < 0.01 && ratio > 0) return `${ratio.toFixed(4)}x`;
+  // For very small ratios, show with 8 decimal places to preserve precision
+  if (ratio < 0.01 && ratio > 0) return `${ratio.toFixed(8)}x`;
   return `${formatNumber(ratio, 2)}x`;
 }
 
@@ -167,7 +167,7 @@ async function main() {
       console.log("=".repeat(80));
       
     } catch (error: any) {
-      console.error("\n❌ Error during processing:", error.message);
+      console.error("\nError during processing:", error.message);
       process.exit(1);
     }
     
@@ -324,9 +324,9 @@ async function main() {
     process.exit(1);
   }
   
-  // Get daily data (first non-TOTAL row)
-  const daily1 = data1Daily[0];
-  const daily2 = data2Daily[0];
+  // Get daily TOTAL data (last row)
+  const daily1 = data1Daily[data1Daily.length - 1];
+  const daily2 = data2Daily[data2Daily.length - 1];
   
   // Calculate excluded positions by reading transaction details
   const calculateExcludedPositions = (transactionFile: string): { 
@@ -495,11 +495,26 @@ async function main() {
   const aeroPerMillion2 = (aeroRewards2 / avgCapital2) * 1_000_000;
   
   
-  // Calculate operating time (assuming ~2.3 hours from 0.0954 days)
-  const operatingDays = 0.0954; // This should ideally come from the summary output
+  // Calculate operating time from actual transaction data for each wallet
+  const metadata1 = extractMetadata(file1TransactionDetails);
+  const metadata2 = extractMetadata(file2TransactionDetails);
+  
+  const operatingSeconds1 = (new Date(metadata1.endTime).getTime() - new Date(metadata1.startTime).getTime()) / 1000;
+  const operatingSeconds2 = (new Date(metadata2.endTime).getTime() - new Date(metadata2.startTime).getTime()) / 1000;
+  const operatingDays1 = operatingSeconds1 / (24 * 60 * 60);
+  const operatingDays2 = operatingSeconds2 / (24 * 60 * 60);
   
   // Calculate capital ratio (baseline for scalable metrics)
+  console.log("\n=== DEBUG: Capital Ratio Calculation ===");
+  console.log(`depositValue1: ${depositValue1}`);
+  console.log(`withdrawValue1: ${withdrawValue1}`);
+  console.log(`avgCapital1: ${avgCapital1}`);
+  console.log(`depositValue2: ${depositValue2}`);
+  console.log(`withdrawValue2: ${withdrawValue2}`);
+  console.log(`avgCapital2: ${avgCapital2}`);
   const capitalRatio = avgCapital1 / avgCapital2;
+  console.log(`capitalRatio: ${capitalRatio}`);
+  console.log("=====================================\n");
   
   // Helper function to calculate ratio vs expected
   const calculateVsExpected = (actualRatio: string, expectedRatio: number): string => {
@@ -515,6 +530,8 @@ async function main() {
     if (ratioVsExpected >= 10) return `${ratioVsExpected.toFixed(1)}x`;
     if (ratioVsExpected >= 1) return `${ratioVsExpected.toFixed(2)}x`;
     if (ratioVsExpected >= 0.01) return `${ratioVsExpected.toFixed(2)}x`;
+    // For very small ratios, use 6 decimal places
+    if (ratioVsExpected < 0.01 && ratioVsExpected > 0) return `${ratioVsExpected.toFixed(6)}x`;
     return `${ratioVsExpected.toFixed(4)}x`;
   };
   
@@ -609,11 +626,12 @@ async function main() {
     ratio: eventsRatio,
     vs_expected: calculateVsExpected(eventsRatio, 1.0) // Should be ~1.0x (efficiency)
   });
+  const operatingTimeRatio = operatingSeconds1 === operatingSeconds2 ? "Same" : calculateRatio(operatingSeconds1, operatingSeconds2);
   csvData.push({
     metric: "Operating Time (last tx - first tx)",
-    [label1]: formatDuration(operatingDays),
-    [label2]: formatDuration(operatingDays),
-    ratio: "Same",
+    [label1]: formatDuration(operatingDays1),
+    [label2]: formatDuration(operatingDays2),
+    ratio: operatingTimeRatio,
     vs_expected: "-"
   });
   const durationRatio = calculateRatio(avgTime1, avgTime2);
@@ -637,8 +655,8 @@ async function main() {
     vs_expected: calculateVsExpected(eventsPerPosRatio, 1.0) // Should be ~1.0x (efficiency)
   });
   
-  const posPerHour1 = positions1 / (operatingDays * 24);
-  const posPerHour2 = positions2 / (operatingDays * 24);
+  const posPerHour1 = positions1 / (operatingDays1 * 24);
+  const posPerHour2 = positions2 / (operatingDays2 * 24);
   const posPerHourRatio = calculateRatio(posPerHour1, posPerHour2);
   csvData.push({
     metric: "Positions per Hour",
@@ -870,8 +888,8 @@ async function main() {
   });
   
   // Calculate APR
-  const apr1 = (profit1 / avgCapital1) * (365 / operatingDays) * 100;
-  const apr2 = (profit2 / avgCapital2) * (365 / operatingDays) * 100;
+  const apr1 = (profit1 / avgCapital1) * (365 / operatingDays1) * 100;
+  const apr2 = (profit2 / avgCapital2) * (365 / operatingDays2) * 100;
   
   // Annualized Returns
   csvData.push({
@@ -920,7 +938,7 @@ async function main() {
   // If running in end-to-end mode, show completion message
   if (args.length === 0) {
     console.log("\n" + "=".repeat(80));
-    console.log("✅ COMPARISON COMPLETE!");
+    console.log("COMPARISON COMPLETE!");
     console.log("=".repeat(80));
     console.log(`\nCheck output/copywallet-comparison/${targetwalletAddr}_${blockRange}/ for results:`);
     console.log("  - copywallet/ - Your copy bot analysis");
